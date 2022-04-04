@@ -242,13 +242,17 @@ type driverResponse struct {
 // return an error. Clients may need to handle such errors before
 // proceeding with further analysis. The PrintErrors function is
 // provided for convenient display of all errors.
-func Load(cfg *Config, patterns ...string) ([]*Package, error) {
+func Load(cfg *Config, sizes *types.StdSizes, patterns ...string) ([]*Package, error) {
 	l := newLoader(cfg)
 	response, err := defaultDriver(&l.Config, patterns...)
 	if err != nil {
 		return nil, err
 	}
-	l.sizes = response.Sizes
+	if sizes != nil {
+		l.sizes = sizes
+	} else {
+		l.sizes = response.Sizes
+	}
 	return l.refine(response.Roots, response.Packages...)
 }
 
