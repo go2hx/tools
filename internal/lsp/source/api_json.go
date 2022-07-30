@@ -116,7 +116,7 @@ var GeneratedAPIJSON = &APIJSON{
 			{
 				Name:      "linkTarget",
 				Type:      "string",
-				Doc:       "linkTarget controls where documentation links go.\nIt might be one of:\n\n* `\"godoc.org\"`\n* `\"pkg.go.dev\"`\n\nIf company chooses to use its own `godoc.org`, its address can be used as well.\n",
+				Doc:       "linkTarget controls where documentation links go.\nIt might be one of:\n\n* `\"godoc.org\"`\n* `\"pkg.go.dev\"`\n\nIf company chooses to use its own `godoc.org`, its address can be used as well.\n\nModules matching the GOPRIVATE environment variable will not have\ndocumentation links in hover.\n",
 				Default:   "\"pkg.go.dev\"",
 				Hierarchy: "ui.documentation",
 			},
@@ -269,13 +269,18 @@ var GeneratedAPIJSON = &APIJSON{
 							Default: "true",
 						},
 						{
+							Name:    "\"embed\"",
+							Doc:     "check for //go:embed directive import\n\nThis analyzer checks that the embed package is imported when source code contains //go:embed comment directives.\nThe embed package must be imported for //go:embed directives to function.import _ \"embed\".",
+							Default: "true",
+						},
+						{
 							Name:    "\"errorsas\"",
 							Doc:     "report passing non-pointer or non-error values to errors.As\n\nThe errorsas analysis reports calls to errors.As where the type\nof the second argument is not a pointer to a type implementing error.",
 							Default: "true",
 						},
 						{
 							Name:    "\"fieldalignment\"",
-							Doc:     "find structs that would use less memory if their fields were sorted\n\nThis analyzer find structs that can be rearranged to use less memory, and provides\na suggested edit with the optimal order.\n\nNote that there are two different diagnostics reported. One checks struct size,\nand the other reports \"pointer bytes\" used. Pointer bytes is how many bytes of the\nobject that the garbage collector has to potentially scan for pointers, for example:\n\n\tstruct { uint32; string }\n\nhave 16 pointer bytes because the garbage collector has to scan up through the string's\ninner pointer.\n\n\tstruct { string; *uint32 }\n\nhas 24 pointer bytes because it has to scan further through the *uint32.\n\n\tstruct { string; uint32 }\n\nhas 8 because it can stop immediately after the string pointer.\n",
+							Doc:     "find structs that would use less memory if their fields were sorted\n\nThis analyzer find structs that can be rearranged to use less memory, and provides\na suggested edit with the most compact order.\n\nNote that there are two different diagnostics reported. One checks struct size,\nand the other reports \"pointer bytes\" used. Pointer bytes is how many bytes of the\nobject that the garbage collector has to potentially scan for pointers, for example:\n\n\tstruct { uint32; string }\n\nhave 16 pointer bytes because the garbage collector has to scan up through the string's\ninner pointer.\n\n\tstruct { string; *uint32 }\n\nhas 24 pointer bytes because it has to scan further through the *uint32.\n\n\tstruct { string; uint32 }\n\nhas 8 because it can stop immediately after the string pointer.\n\nBe aware that the most compact order is not always the most efficient.\nIn rare cases it may cause two variables each updated by its own goroutine\nto occupy the same CPU cache line, inducing a form of memory contention\nknown as \"false sharing\" that slows down both goroutines.\n",
 							Default: "false",
 						},
 						{
@@ -429,6 +434,11 @@ var GeneratedAPIJSON = &APIJSON{
 							Default: "true",
 						},
 						{
+							Name:    "\"unusedvariable\"",
+							Doc:     "check for unused variables\n\nThe unusedvariable analyzer suggests fixes for unused variables errors.\n",
+							Default: "false",
+						},
+						{
 							Name:    "\"fillstruct\"",
 							Doc:     "note incomplete struct initializations\n\nThis analyzer provides diagnostics for any struct literals that do not have\nany fields initialized. Because the suggested fix for this analysis is\nexpensive to compute, callers should compute it separately, using the\nSuggestedFix function below.\n",
 							Default: "true",
@@ -499,6 +509,51 @@ var GeneratedAPIJSON = &APIJSON{
 				Default:   "\"0s\"",
 				Status:    "experimental",
 				Hierarchy: "ui.diagnostic",
+			},
+			{
+				Name: "hints",
+				Type: "map[string]bool",
+				Doc:  "hints specify inlay hints that users want to see.\nA full list of hints that gopls uses can be found\n[here](https://github.com/golang/tools/blob/master/gopls/doc/inlayHints.md).\n",
+				EnumKeys: EnumKeys{Keys: []EnumKey{
+					{
+						Name:    "\"assignVariableTypes\"",
+						Doc:     "Enable/disable inlay hints for variable types in assign statements:\n```go\n\ti/* int*/, j/* int*/ := 0, len(r)-1\n```",
+						Default: "false",
+					},
+					{
+						Name:    "\"compositeLiteralFields\"",
+						Doc:     "Enable/disable inlay hints for composite literal field names:\n```go\n\t{/*in: */\"Hello, world\", /*want: */\"dlrow ,olleH\"}\n```",
+						Default: "false",
+					},
+					{
+						Name:    "\"compositeLiteralTypes\"",
+						Doc:     "Enable/disable inlay hints for composite literal types:\n```go\n\tfor _, c := range []struct {\n\t\tin, want string\n\t}{\n\t\t/*struct{ in string; want string }*/{\"Hello, world\", \"dlrow ,olleH\"},\n\t}\n```",
+						Default: "false",
+					},
+					{
+						Name:    "\"constantValues\"",
+						Doc:     "Enable/disable inlay hints for constant values:\n```go\n\tconst (\n\t\tKindNone   Kind = iota/* = 0*/\n\t\tKindPrint/*  = 1*/\n\t\tKindPrintf/* = 2*/\n\t\tKindErrorf/* = 3*/\n\t)\n```",
+						Default: "false",
+					},
+					{
+						Name:    "\"functionTypeParameters\"",
+						Doc:     "Enable/disable inlay hints for implicit type parameters on generic functions:\n```go\n\tmyFoo/*[int, string]*/(1, \"hello\")\n```",
+						Default: "false",
+					},
+					{
+						Name:    "\"parameterNames\"",
+						Doc:     "Enable/disable inlay hints for parameter names:\n```go\n\tparseInt(/* str: */ \"123\", /* radix: */ 8)\n```",
+						Default: "false",
+					},
+					{
+						Name:    "\"rangeVariableTypes\"",
+						Doc:     "Enable/disable inlay hints for variable types in range statements:\n```go\n\tfor k/* int*/, v/* string*/ := range []string{} {\n\t\tfmt.Println(k, v)\n\t}\n```",
+						Default: "false",
+					},
+				}},
+				Default:   "{}",
+				Status:    "experimental",
+				Hierarchy: "ui.inlayhint",
 			},
 			{
 				Name: "codelenses",
@@ -670,7 +725,7 @@ var GeneratedAPIJSON = &APIJSON{
 			Title:     "Run vulncheck (experimental)",
 			Doc:       "Run vulnerability check (`govulncheck`).",
 			ArgDoc:    "{\n\t// Dir is the directory from which vulncheck will run from.\n\t\"Dir\": string,\n\t// Package pattern. E.g. \"\", \".\", \"./...\".\n\t\"Pattern\": string,\n}",
-			ResultDoc: "{\n\t\"Vuln\": []{\n\t\t\"ID\": string,\n\t\t\"Details\": string,\n\t\t\"Aliases\": []string,\n\t\t\"Symbol\": string,\n\t\t\"PkgPath\": string,\n\t\t\"ModPath\": string,\n\t\t\"URL\": string,\n\t\t\"CurrentVersion\": string,\n\t\t\"FixedVersion\": string,\n\t\t\"CallStacks\": [][]golang.org/x/tools/internal/lsp/command.StackEntry,\n\t},\n}",
+			ResultDoc: "{\n\t\"Vuln\": []{\n\t\t\"ID\": string,\n\t\t\"Details\": string,\n\t\t\"Aliases\": []string,\n\t\t\"Symbol\": string,\n\t\t\"PkgPath\": string,\n\t\t\"ModPath\": string,\n\t\t\"URL\": string,\n\t\t\"CurrentVersion\": string,\n\t\t\"FixedVersion\": string,\n\t\t\"CallStacks\": [][]golang.org/x/tools/internal/lsp/command.StackEntry,\n\t\t\"CallStackSummaries\": []string,\n\t},\n}",
 		},
 		{
 			Command:   "gopls.start_debugging",
@@ -805,13 +860,18 @@ var GeneratedAPIJSON = &APIJSON{
 			Default: true,
 		},
 		{
+			Name:    "embed",
+			Doc:     "check for //go:embed directive import\n\nThis analyzer checks that the embed package is imported when source code contains //go:embed comment directives.\nThe embed package must be imported for //go:embed directives to function.import _ \"embed\".",
+			Default: true,
+		},
+		{
 			Name:    "errorsas",
 			Doc:     "report passing non-pointer or non-error values to errors.As\n\nThe errorsas analysis reports calls to errors.As where the type\nof the second argument is not a pointer to a type implementing error.",
 			Default: true,
 		},
 		{
 			Name: "fieldalignment",
-			Doc:  "find structs that would use less memory if their fields were sorted\n\nThis analyzer find structs that can be rearranged to use less memory, and provides\na suggested edit with the optimal order.\n\nNote that there are two different diagnostics reported. One checks struct size,\nand the other reports \"pointer bytes\" used. Pointer bytes is how many bytes of the\nobject that the garbage collector has to potentially scan for pointers, for example:\n\n\tstruct { uint32; string }\n\nhave 16 pointer bytes because the garbage collector has to scan up through the string's\ninner pointer.\n\n\tstruct { string; *uint32 }\n\nhas 24 pointer bytes because it has to scan further through the *uint32.\n\n\tstruct { string; uint32 }\n\nhas 8 because it can stop immediately after the string pointer.\n",
+			Doc:  "find structs that would use less memory if their fields were sorted\n\nThis analyzer find structs that can be rearranged to use less memory, and provides\na suggested edit with the most compact order.\n\nNote that there are two different diagnostics reported. One checks struct size,\nand the other reports \"pointer bytes\" used. Pointer bytes is how many bytes of the\nobject that the garbage collector has to potentially scan for pointers, for example:\n\n\tstruct { uint32; string }\n\nhave 16 pointer bytes because the garbage collector has to scan up through the string's\ninner pointer.\n\n\tstruct { string; *uint32 }\n\nhas 24 pointer bytes because it has to scan further through the *uint32.\n\n\tstruct { string; uint32 }\n\nhas 8 because it can stop immediately after the string pointer.\n\nBe aware that the most compact order is not always the most efficient.\nIn rare cases it may cause two variables each updated by its own goroutine\nto occupy the same CPU cache line, inducing a form of memory contention\nknown as \"false sharing\" that slows down both goroutines.\n",
 		},
 		{
 			Name:    "httpresponse",
@@ -959,6 +1019,10 @@ var GeneratedAPIJSON = &APIJSON{
 			Default: true,
 		},
 		{
+			Name: "unusedvariable",
+			Doc:  "check for unused variables\n\nThe unusedvariable analyzer suggests fixes for unused variables errors.\n",
+		},
+		{
 			Name:    "fillstruct",
 			Doc:     "note incomplete struct initializations\n\nThis analyzer provides diagnostics for any struct literals that do not have\nany fields initialized. Because the suggested fix for this analysis is\nexpensive to compute, callers should compute it separately, using the\nSuggestedFix function below.\n",
 			Default: true,
@@ -967,6 +1031,36 @@ var GeneratedAPIJSON = &APIJSON{
 			Name:    "stubmethods",
 			Doc:     "stub methods analyzer\n\nThis analyzer generates method stubs for concrete types\nin order to implement a target interface",
 			Default: true,
+		},
+	},
+	Hints: []*HintJSON{
+		{
+			Name: "assignVariableTypes",
+			Doc:  "Enable/disable inlay hints for variable types in assign statements:\n```go\n\ti/* int*/, j/* int*/ := 0, len(r)-1\n```",
+		},
+		{
+			Name: "compositeLiteralFields",
+			Doc:  "Enable/disable inlay hints for composite literal field names:\n```go\n\t{/*in: */\"Hello, world\", /*want: */\"dlrow ,olleH\"}\n```",
+		},
+		{
+			Name: "compositeLiteralTypes",
+			Doc:  "Enable/disable inlay hints for composite literal types:\n```go\n\tfor _, c := range []struct {\n\t\tin, want string\n\t}{\n\t\t/*struct{ in string; want string }*/{\"Hello, world\", \"dlrow ,olleH\"},\n\t}\n```",
+		},
+		{
+			Name: "constantValues",
+			Doc:  "Enable/disable inlay hints for constant values:\n```go\n\tconst (\n\t\tKindNone   Kind = iota/* = 0*/\n\t\tKindPrint/*  = 1*/\n\t\tKindPrintf/* = 2*/\n\t\tKindErrorf/* = 3*/\n\t)\n```",
+		},
+		{
+			Name: "functionTypeParameters",
+			Doc:  "Enable/disable inlay hints for implicit type parameters on generic functions:\n```go\n\tmyFoo/*[int, string]*/(1, \"hello\")\n```",
+		},
+		{
+			Name: "parameterNames",
+			Doc:  "Enable/disable inlay hints for parameter names:\n```go\n\tparseInt(/* str: */ \"123\", /* radix: */ 8)\n```",
+		},
+		{
+			Name: "rangeVariableTypes",
+			Doc:  "Enable/disable inlay hints for variable types in range statements:\n```go\n\tfor k/* int*/, v/* string*/ := range []string{} {\n\t\tfmt.Println(k, v)\n\t}\n```",
 		},
 	},
 }

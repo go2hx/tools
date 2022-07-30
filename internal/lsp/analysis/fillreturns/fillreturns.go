@@ -19,6 +19,7 @@ import (
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/internal/analysisinternal"
+	"golang.org/x/tools/internal/lsp/fuzzy"
 	"golang.org/x/tools/internal/typeparams"
 )
 
@@ -112,7 +113,7 @@ outer:
 				break
 			}
 		}
-		if enclosingFunc == nil {
+		if enclosingFunc == nil || enclosingFunc.Results == nil {
 			continue
 		}
 
@@ -188,13 +189,12 @@ outer:
 				if !ok {
 					return nil, fmt.Errorf("invalid return type: %v", retTyp)
 				}
-				// Find the identifer whose name is most similar to the return type.
-				// If we do not find any identifer that matches the pattern,
+				// Find the identifier whose name is most similar to the return type.
+				// If we do not find any identifier that matches the pattern,
 				// generate a zero value.
-				value := analysisinternal.FindBestMatch(retTyp.String(), idents)
+				value := fuzzy.FindBestMatch(retTyp.String(), idents)
 				if value == nil {
-					value = analysisinternal.ZeroValue(
-						pass.Fset, file, pass.Pkg, retTyp)
+					value = analysisinternal.ZeroValue(file, pass.Pkg, retTyp)
 				}
 				if value == nil {
 					return nil, nil

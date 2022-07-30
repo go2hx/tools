@@ -259,10 +259,11 @@ func FormatVarType(ctx context.Context, snapshot Snapshot, srcpkg Package, obj *
 		return types.TypeString(obj.Type(), qf)
 	}
 
-	expr, err := varType(ctx, snapshot, pkg, obj)
-	if err != nil {
+	_, field := FindDeclAndField(pkg.GetSyntax(), obj.Pos())
+	if field == nil {
 		return types.TypeString(obj.Type(), qf)
 	}
+	expr := field.Type
 
 	// If the given expr refers to a type parameter, then use the
 	// object's Type instead of the type parameter declaration. This helps
@@ -284,18 +285,6 @@ func FormatVarType(ctx context.Context, snapshot Snapshot, srcpkg Package, obj *
 	qualified = qualifyExpr(qualified, srcpkg, pkg, clonedInfo, qf)
 	fmted := FormatNode(snapshot.FileSet(), qualified)
 	return fmted
-}
-
-// varType returns the type expression for a *types.Var.
-func varType(ctx context.Context, snapshot Snapshot, pkg Package, obj *types.Var) (ast.Expr, error) {
-	field, err := snapshot.PosToField(ctx, pkg, obj.Pos())
-	if err != nil {
-		return nil, err
-	}
-	if field == nil {
-		return nil, fmt.Errorf("no declaration for object %s", obj.Name())
-	}
-	return field.Type, nil
 }
 
 // qualifyExpr applies the "pkgName." prefix to any *ast.Ident in the expr.
@@ -343,9 +332,11 @@ func qualifyExpr(expr ast.Expr, srcpkg, pkg Package, clonedInfo map[token.Pos]*t
 // cloneExpr only clones expressions that appear in the parameters or return
 // values of a function declaration. The original expression may be returned
 // to the caller in 2 cases:
-//    (1) The expression has no pointer fields.
-//    (2) The expression cannot appear in an *ast.FuncType, making it
-//        unnecessary to clone.
+//
+//  1. The expression has no pointer fields.
+//  2. The expression cannot appear in an *ast.FuncType, making it
+//     unnecessary to clone.
+//
 // This function also keeps track of selector expressions in which the X is a
 // package name and marks them in a map along with their type information, so
 // that this information can be used when rewriting the expression.

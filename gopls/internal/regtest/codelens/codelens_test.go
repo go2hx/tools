@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"golang.org/x/tools/gopls/internal/hooks"
+	"golang.org/x/tools/internal/lsp/bug"
 	. "golang.org/x/tools/internal/lsp/regtest"
 
 	"golang.org/x/tools/internal/lsp/command"
@@ -21,6 +22,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	bug.PanicOnBugs = true
 	Main(m, hooks.Options)
 }
 
@@ -61,9 +63,7 @@ const (
 	for _, test := range tests {
 		t.Run(test.label, func(t *testing.T) {
 			WithOptions(
-				EditorConfig{
-					CodeLenses: test.enabled,
-				},
+				Settings{"codelenses": test.enabled},
 			).Run(t, workspace, func(t *testing.T, env *Env) {
 				env.OpenFile("lib.go")
 				lens := env.CodeLens("lib.go")
@@ -306,10 +306,11 @@ func main() {
 }
 `
 	WithOptions(
-		EditorConfig{
-			CodeLenses: map[string]bool{
+		Settings{
+			"codelenses": map[string]bool{
 				"gc_details": true,
-			}},
+			},
+		},
 	).Run(t, mod, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
 		env.ExecuteCodeLensCommand("main.go", command.GCDetails)

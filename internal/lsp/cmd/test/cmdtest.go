@@ -50,7 +50,7 @@ func TestCommandLine(t *testing.T, testdata string, options func(*source.Options
 
 func NewTestServer(ctx context.Context, options func(*source.Options)) *servertest.TCPServer {
 	ctx = debug.WithInstance(ctx, "", "")
-	cache := cache.New(options)
+	cache := cache.New(nil, nil, options)
 	ss := lsprpc.NewStreamServer(cache, false)
 	return servertest.NewTCPServer(ctx, ss, nil)
 }
@@ -111,6 +111,10 @@ func (r *runner) AddImport(t *testing.T, uri span.URI, expectedImport string) {
 
 func (r *runner) Hover(t *testing.T, spn span.Span, info string) {
 	//TODO: hovering not supported on command line
+}
+
+func (r *runner) InlayHints(t *testing.T, spn span.Span) {
+	// TODO: inlayHints not supported on command line
 }
 
 func (r *runner) runGoplsCmd(t testing.TB, args ...string) (string, string) {

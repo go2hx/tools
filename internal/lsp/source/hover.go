@@ -7,6 +7,7 @@ package source
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/constant"
@@ -21,9 +22,10 @@ import (
 
 	"golang.org/x/text/unicode/runenames"
 	"golang.org/x/tools/internal/event"
+	"golang.org/x/tools/internal/lsp/bug"
 	"golang.org/x/tools/internal/lsp/protocol"
+	"golang.org/x/tools/internal/lsp/safetoken"
 	"golang.org/x/tools/internal/typeparams"
-	errors "golang.org/x/xerrors"
 )
 
 // HoverContext contains context extracted from the syntax and type information
@@ -140,15 +142,10 @@ func findRune(ctx context.Context, snapshot Snapshot, fh FileHandle, position pr
 	if err != nil {
 		return 0, MappedRange{}, err
 	}
-	spn, err := pgf.Mapper.PointSpan(position)
+	pos, err := pgf.Mapper.Pos(position)
 	if err != nil {
 		return 0, MappedRange{}, err
 	}
-	rng, err := spn.Range(pgf.Mapper.Converter)
-	if err != nil {
-		return 0, MappedRange{}, err
-	}
-	pos := rng.Start
 
 	// Find the basic literal enclosing the given position, if there is one.
 	var lit *ast.BasicLit
@@ -201,11 +198,11 @@ func findRune(ctx context.Context, snapshot Snapshot, fh FileHandle, position pr
 		// It's a string, scan only if it contains a unicode escape sequence under or before the
 		// current cursor position.
 		var found bool
-		litOffset, err := Offset(pgf.Tok, lit.Pos())
+		litOffset, err := safetoken.Offset(pgf.Tok, lit.Pos())
 		if err != nil {
 			return 0, MappedRange{}, err
 		}
-		offset, err := Offset(pgf.Tok, pos)
+		offset, err := safetoken.Offset(pgf.Tok, pos)
 		if err != nil {
 			return 0, MappedRange{}, err
 		}
@@ -405,6 +402,15 @@ func linkData(obj types.Object, enclosing *types.TypeName) (name, importPath, an
 		return "", "", ""
 	}
 
+	// golang/go#52211: somehow we get here with a nil obj.Pkg
+	if obj.Pkg() == nil {
+		bug.Report("object with nil pkg", bug.Data{
+			"name": obj.Name(),
+			"type": fmt.Sprintf("%T", obj),
+		})
+		return "", "", ""
+	}
+
 	importPath = obj.Pkg().Path()
 	if recv != nil {
 		anchor = fmt.Sprintf("%s.%s", recv.Name(), obj.Name())
@@ -510,21 +516,25 @@ func FindHoverContext(ctx context.Context, s Snapshot, pkg Package, obj types.Ob
 		}
 	case *ast.ImportSpec:
 		// Try to find the package documentation for an imported package.
-		if pkgName, ok := obj.(*types.PkgName); ok {
-			imp, err := pkg.GetImport(pkgName.Imported().Path())
-			if err != nil {
-				return nil, err
-			}
-			// Assume that only one file will contain package documentation,
-			// so pick the first file that has a doc comment.
-			for _, file := range imp.GetSyntax() {
-				if file.Doc != nil {
-					info = &HoverContext{signatureSource: obj, Comment: file.Doc}
-					break
+		pkgPath, err := strconv.Unquote(node.Path.Value)
+		if err != nil {
+			return nil, err
+		}
+		imp, err := pkg.GetImport(pkgPath)
+		if err != nil {
+			return nil, err
+		}
+		// Assume that only one file will contain package documentation,
+		// so pick the first file that has a doc comment.
+		for _, file := range imp.GetSyntax() {
+			if file.Doc != nil {
+				info = &HoverContext{Comment: file.Doc}
+				if file.Name != nil {
+					info.signatureSource = "package " + file.Name.Name
 				}
+				break
 			}
 		}
-		info = &HoverContext{signatureSource: node}
 	case *ast.GenDecl:
 		switch obj := obj.(type) {
 		case *types.TypeName, *types.Var, *types.Const, *types.Func:
@@ -536,7 +546,7 @@ func FindHoverContext(ctx context.Context, s Snapshot, pkg Package, obj types.Ob
 			// obj may not have been produced by type checking the AST containing
 			// node, so we need to be careful about using token.Pos.
 			tok := s.FileSet().File(obj.Pos())
-			offset, err := Offset(tok, obj.Pos())
+			offset, err := safetoken.Offset(tok, obj.Pos())
 			if err != nil {
 				return nil, err
 			}
@@ -544,7 +554,7 @@ func FindHoverContext(ctx context.Context, s Snapshot, pkg Package, obj types.Ob
 			// fullTok and fullPos are the *token.File and object position in for the
 			// full AST.
 			fullTok := s.FileSet().File(node.Pos())
-			fullPos, err := Pos(fullTok, offset)
+			fullPos, err := safetoken.Pos(fullTok, offset)
 			if err != nil {
 				return nil, err
 			}
@@ -552,11 +562,11 @@ func FindHoverContext(ctx context.Context, s Snapshot, pkg Package, obj types.Ob
 			var spec ast.Spec
 			for _, s := range node.Specs {
 				// Avoid panics by guarding the calls to token.Offset (golang/go#48249).
-				start, err := Offset(fullTok, s.Pos())
+				start, err := safetoken.Offset(fullTok, s.Pos())
 				if err != nil {
 					return nil, err
 				}
-				end, err := Offset(fullTok, s.End())
+				end, err := safetoken.Offset(fullTok, s.End())
 				if err != nil {
 					return nil, err
 				}
@@ -587,11 +597,9 @@ func FindHoverContext(ctx context.Context, s Snapshot, pkg Package, obj types.Ob
 				info.signatureSource = "func " + sig.name + sig.Format()
 			} else {
 				// Fall back on the object as a signature source.
-
-				// TODO(rfindley): refactor so that we can report bugs from the source
-				// package.
-
-				// debug.Bug(ctx, "invalid builtin hover", "did not find builtin signature: %v", err)
+				bug.Report("invalid builtin hover", bug.Data{
+					"err": err.Error(),
+				})
 				info.signatureSource = obj
 			}
 		case *types.Var:
@@ -602,11 +610,7 @@ func FindHoverContext(ctx context.Context, s Snapshot, pkg Package, obj types.Ob
 				break
 			}
 
-			field, err := s.PosToField(ctx, pkg, obj.Pos())
-			if err != nil {
-				return nil, err
-			}
-
+			_, field := FindDeclAndField(pkg.GetSyntax(), obj.Pos())
 			if field != nil {
 				comment := field.Doc
 				if comment.Text() == "" {
@@ -648,7 +652,7 @@ func isFunctionParam(obj types.Object, node *ast.FuncDecl) bool {
 // given nodes; fullPos is the position of obj in node's AST.
 func hoverGenDecl(node *ast.GenDecl, spec ast.Spec, fullPos token.Pos, obj types.Object) (*HoverContext, error) {
 	if spec == nil {
-		return nil, errors.Errorf("no spec for node %v at position %v", node, fullPos)
+		return nil, fmt.Errorf("no spec for node %v at position %v", node, fullPos)
 	}
 
 	// If we have a field or method.
@@ -665,7 +669,7 @@ func hoverGenDecl(node *ast.GenDecl, spec ast.Spec, fullPos token.Pos, obj types
 	case *ast.ImportSpec:
 		return &HoverContext{signatureSource: spec, Comment: spec.Doc}, nil
 	}
-	return nil, errors.Errorf("unable to format spec %v (%T)", spec, spec)
+	return nil, fmt.Errorf("unable to format spec %v (%T)", spec, spec)
 }
 
 // TODO(rfindley): rename this function.
@@ -867,4 +871,100 @@ func anyNonEmpty(x []string) bool {
 		}
 	}
 	return false
+}
+
+// FindDeclAndField returns the var/func/type/const Decl that declares
+// the identifier at pos, searching the given list of file syntax
+// trees. If pos is the position of an ast.Field or one of its Names
+// or Ellipsis.Elt, the field is returned, along with the innermost
+// enclosing Decl, which could be only loosely related---consider:
+//
+//    var decl = f(  func(field int) {}  )
+//
+// It returns (nil, nil) if no Field or Decl is found at pos.
+func FindDeclAndField(files []*ast.File, pos token.Pos) (decl ast.Decl, field *ast.Field) {
+	// panic(nil) breaks off the traversal and
+	// causes the function to return normally.
+	defer func() {
+		if x := recover(); x != nil {
+			panic(x)
+		}
+	}()
+
+	// Visit the files in search of the node at pos.
+	var stack []ast.Node
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			if n != nil {
+				stack = append(stack, n) // push
+			} else {
+				stack = stack[:len(stack)-1] // pop
+				return false
+			}
+
+			// Skip subtrees (incl. files) that don't contain the search point.
+			if !(n.Pos() <= pos && pos < n.End()) {
+				return false
+			}
+
+			switch n := n.(type) {
+			case *ast.Field:
+				checkField := func(f ast.Node) {
+					if f.Pos() == pos {
+						field = n
+						for i := len(stack) - 1; i >= 0; i-- {
+							if d, ok := stack[i].(ast.Decl); ok {
+								decl = d // innermost enclosing decl
+								break
+							}
+						}
+						panic(nil) // found
+					}
+				}
+
+				// Check *ast.Field itself. This handles embedded
+				// fields which have no associated *ast.Ident name.
+				checkField(n)
+
+				// Check each field name since you can have
+				// multiple names for the same type expression.
+				for _, name := range n.Names {
+					checkField(name)
+				}
+
+				// Also check "X" in "...X". This makes it easy
+				// to format variadic signature params properly.
+				if ell, ok := n.Type.(*ast.Ellipsis); ok && ell.Elt != nil {
+					checkField(ell.Elt)
+				}
+
+			case *ast.FuncDecl:
+				if n.Name.Pos() == pos {
+					decl = n
+					panic(nil) // found
+				}
+
+			case *ast.GenDecl:
+				for _, spec := range n.Specs {
+					switch spec := spec.(type) {
+					case *ast.TypeSpec:
+						if spec.Name.Pos() == pos {
+							decl = n
+							panic(nil) // found
+						}
+					case *ast.ValueSpec:
+						for _, id := range spec.Names {
+							if id.Pos() == pos {
+								decl = n
+								panic(nil) // found
+							}
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+
+	return nil, nil
 }

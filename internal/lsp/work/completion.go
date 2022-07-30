@@ -6,6 +6,8 @@ package work
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -15,7 +17,6 @@ import (
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/lsp/protocol"
 	"golang.org/x/tools/internal/lsp/source"
-	errors "golang.org/x/xerrors"
 )
 
 func Completion(ctx context.Context, snapshot source.Snapshot, fh source.VersionedFileHandle, position protocol.Position) (*protocol.CompletionList, error) {
@@ -25,19 +26,15 @@ func Completion(ctx context.Context, snapshot source.Snapshot, fh source.Version
 	// Get the position of the cursor.
 	pw, err := snapshot.ParseWork(ctx, fh)
 	if err != nil {
-		return nil, errors.Errorf("getting go.work file handle: %w", err)
+		return nil, fmt.Errorf("getting go.work file handle: %w", err)
 	}
-	spn, err := pw.Mapper.PointSpan(position)
+	pos, err := pw.Mapper.Pos(position)
 	if err != nil {
-		return nil, errors.Errorf("computing cursor position: %w", err)
-	}
-	rng, err := spn.Range(pw.Mapper.Converter)
-	if err != nil {
-		return nil, errors.Errorf("computing range: %w", err)
+		return nil, fmt.Errorf("computing cursor position: %w", err)
 	}
 
 	// Find the use statement the user is in.
-	cursor := rng.Start - 1
+	cursor := pos - 1
 	use, pathStart, _ := usePath(pw, cursor)
 	if use == nil {
 		return &protocol.CompletionList{}, nil
@@ -123,7 +120,7 @@ func Completion(ctx context.Context, snapshot source.Snapshot, fh source.Version
 		return nil
 	})
 	if err != nil && !errors.Is(err, stopWalking) {
-		return nil, errors.Errorf("walking to find completions: %w", err)
+		return nil, fmt.Errorf("walking to find completions: %w", err)
 	}
 
 	sort.Strings(completions)

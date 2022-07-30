@@ -7,6 +7,8 @@ package source
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/scanner"
@@ -24,7 +26,6 @@ import (
 	"golang.org/x/tools/internal/lsp/progress"
 	"golang.org/x/tools/internal/lsp/protocol"
 	"golang.org/x/tools/internal/span"
-	errors "golang.org/x/xerrors"
 )
 
 // Snapshot represents the current state for the given view.
@@ -78,17 +79,6 @@ type Snapshot interface {
 	// If the file is not available, returns nil and an error.
 	ParseGo(ctx context.Context, fh FileHandle, mode ParseMode) (*ParsedGoFile, error)
 
-	// PosToField is a cache of *ast.Fields by token.Pos. This allows us
-	// to quickly find corresponding *ast.Field node given a *types.Var.
-	// We must refer to the AST to render type aliases properly when
-	// formatting signatures and other types.
-	PosToField(ctx context.Context, pkg Package, pos token.Pos) (*ast.Field, error)
-
-	// PosToDecl maps certain objects' positions to their surrounding
-	// ast.Decl. This mapping is used when building the documentation
-	// string for the objects.
-	PosToDecl(ctx context.Context, pkg Package, pos token.Pos) (ast.Decl, error)
-
 	// DiagnosePackage returns basic diagnostics, including list, parse, and type errors
 	// for pkg, grouped by file.
 	DiagnosePackage(ctx context.Context, pkg Package) (map[span.URI][]*Diagnostic, error)
@@ -98,6 +88,10 @@ type Snapshot interface {
 
 	// RunGoCommandPiped runs the given `go` command, writing its output
 	// to stdout and stderr. Verb, Args, and WorkingDir must be specified.
+	//
+	// RunGoCommandPiped runs the command serially using gocommand.RunPiped,
+	// enforcing that this command executes exclusively to other commands on the
+	// server.
 	RunGoCommandPiped(ctx context.Context, mode InvocationFlags, inv *gocommand.Invocation, stdout, stderr io.Writer) error
 
 	// RunGoCommandDirect runs the given `go` command. Verb, Args, and
@@ -142,8 +136,8 @@ type Snapshot interface {
 	// IsBuiltin reports whether uri is part of the builtin package.
 	IsBuiltin(ctx context.Context, uri span.URI) bool
 
-	// PackagesForFile returns the packages that this file belongs to, checked
-	// in mode.
+	// PackagesForFile returns an unordered list of packages that contain
+	// the file denoted by uri, type checked in the specified mode.
 	PackagesForFile(ctx context.Context, uri span.URI, mode TypecheckMode, includeTestVariants bool) ([]Package, error)
 
 	// PackageForFile returns a single package that this file belongs to,
@@ -170,7 +164,7 @@ type Snapshot interface {
 	ActivePackages(ctx context.Context) ([]Package, error)
 
 	// Symbols returns all symbols in the snapshot.
-	Symbols(ctx context.Context) (map[span.URI][]Symbol, error)
+	Symbols(ctx context.Context) map[span.URI][]Symbol
 
 	// Metadata returns package metadata associated with the given file URI.
 	MetadataForFile(ctx context.Context, uri span.URI) ([]Metadata, error)
@@ -251,10 +245,14 @@ type View interface {
 	// original one will be.
 	SetOptions(context.Context, *Options) (View, error)
 
-	// Snapshot returns the current snapshot for the view.
+	// Snapshot returns the current snapshot for the view, and a
+	// release function that must be called when the Snapshot is
+	// no longer needed.
 	Snapshot(ctx context.Context) (Snapshot, func())
 
-	// Rebuild rebuilds the current view, replacing the original view in its session.
+	// Rebuild rebuilds the current view, replacing the original
+	// view in its session.  It returns a Snapshot and a release
+	// function that must be called when the Snapshot is no longer needed.
 	Rebuild(ctx context.Context) (Snapshot, func(), error)
 
 	// IsGoPrivatePath reports whether target is a private import path, as identified
@@ -288,6 +286,7 @@ type ParsedGoFile struct {
 	// Source code used to build the AST. It may be different from the
 	// actual content of the file if we have fixed the AST.
 	Src      []byte
+	Fixed    bool
 	Mapper   *protocol.ColumnMapper
 	ParseErr scanner.ErrorList
 }
@@ -338,7 +337,8 @@ type Session interface {
 	// NewView creates a new View, returning it and its first snapshot. If a
 	// non-empty tempWorkspace directory is provided, the View will record a copy
 	// of its gopls workspace module in that directory, so that client tooling
-	// can execute in the same main module.
+	// can execute in the same main module.  On success it also returns a release
+	// function that must be called when the Snapshot is no longer needed.
 	NewView(ctx context.Context, name string, folder span.URI, options *Options) (View, Snapshot, func(), error)
 
 	// Cache returns the cache that created this session, for debugging only.
@@ -362,7 +362,9 @@ type Session interface {
 	// DidModifyFile reports a file modification to the session. It returns
 	// the new snapshots after the modifications have been applied, paired with
 	// the affected file URIs for those snapshots.
-	DidModifyFiles(ctx context.Context, changes []FileModification) (map[Snapshot][]span.URI, []func(), error)
+	// On success, it returns a release function that
+	// must be called when the snapshots are no longer needed.
+	DidModifyFiles(ctx context.Context, changes []FileModification) (map[Snapshot][]span.URI, func(), error)
 
 	// ExpandModificationsToDirectories returns the set of changes with the
 	// directory changes removed and expanded to include all of the files in
@@ -473,6 +475,10 @@ const (
 	ParseFull
 )
 
+// AllParseModes contains all possible values of ParseMode.
+// It is used for cache invalidation on a file content change.
+var AllParseModes = []ParseMode{ParseHeader, ParseExported, ParseFull}
+
 // TypecheckMode controls what kind of parsing should be done (see ParseMode)
 // while type checking a package.
 type TypecheckMode int
@@ -524,12 +530,37 @@ type FileHandle interface {
 	Saved() bool
 }
 
+// A Hash is a cryptographic digest of the contents of a file.
+// (Although at 32B it is larger than a 16B string header, it is smaller
+// and has better locality than the string header + 64B of hex digits.)
+type Hash [sha256.Size]byte
+
+// HashOf returns the hash of some data.
+func HashOf(data []byte) Hash {
+	return Hash(sha256.Sum256(data))
+}
+
+// Hashf returns the hash of a printf-formatted string.
+func Hashf(format string, args ...interface{}) Hash {
+	// Although this looks alloc-heavy, it is faster than using
+	// Fprintf on sha256.New() because the allocations don't escape.
+	return HashOf([]byte(fmt.Sprintf(format, args...)))
+}
+
+// String returns the digest as a string of hex digits.
+func (h Hash) String() string {
+	return fmt.Sprintf("%64x", [sha256.Size]byte(h))
+}
+
+// Less returns true if the given hash is less than the other.
+func (h Hash) Less(other Hash) bool {
+	return bytes.Compare(h[:], other[:]) < 0
+}
+
 // FileIdentity uniquely identifies a file at a version from a FileSystem.
 type FileIdentity struct {
-	URI span.URI
-
-	// Identifier represents a unique identifier for the file's content.
-	Hash string
+	URI  span.URI
+	Hash Hash // digest of file contents
 }
 
 func (id FileIdentity) String() string {
@@ -617,11 +648,15 @@ type Package interface {
 	ParseMode() ParseMode
 }
 
+// A CriticalError is a workspace-wide error that generally prevents gopls from
+// functioning correctly. In the presence of critical errors, other diagnostics
+// in the workspace may not make sense.
 type CriticalError struct {
 	// MainError is the primary error. Must be non-nil.
 	MainError error
-	// DiagList contains any supplemental (structured) diagnostics.
-	DiagList []*Diagnostic
+
+	// Diagnostics contains any supplemental (structured) diagnostics.
+	Diagnostics []*Diagnostic
 }
 
 // An Diagnostic corresponds to an LSP Diagnostic.
@@ -677,7 +712,7 @@ var (
 // The major version is not included, as that depends on the module path.
 //
 // If workspace module A is dependent on workspace module B, we need our
-// nonexistant version to be greater than the version A mentions.
+// nonexistent version to be greater than the version A mentions.
 // Otherwise, the go command will try to update to that version. Use a very
 // high minor version to make that more likely.
 const workspaceModuleVersion = ".9999999.0-goplsworkspace"

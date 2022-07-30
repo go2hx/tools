@@ -35,6 +35,7 @@ still be able to independently override specific experimental features.
   * [Completion](#completion)
   * [Diagnostic](#diagnostic)
   * [Documentation](#documentation)
+  * [Inlayhint](#inlayhint)
   * [Navigation](#navigation)
 
 ### Build
@@ -362,6 +363,9 @@ It might be one of:
 
 If company chooses to use its own `godoc.org`, its address can be used as well.
 
+Modules matching the GOPRIVATE environment variable will not have
+documentation links in hover.
+
 Default: `"pkg.go.dev"`.
 
 ##### **linksInHover** *bool*
@@ -369,6 +373,18 @@ Default: `"pkg.go.dev"`.
 linksInHover toggles the presence of links to documentation in hover.
 
 Default: `true`.
+
+#### Inlayhint
+
+##### **hints** *map[string]bool*
+
+**This setting is experimental and may be deleted.**
+
+hints specify inlay hints that users want to see.
+A full list of hints that gopls uses can be found
+[here](https://github.com/golang/tools/blob/master/gopls/doc/inlayHints.md).
+
+Default: `{}`.
 
 #### Navigation
 
@@ -438,6 +454,16 @@ verboseOutput enables additional debug logging.
 Default: `false`.
 
 <!-- END User: DO NOT MANUALLY EDIT THIS SECTION -->
+
+#### **newDiff** *string*
+
+newDiff enables the new diff implementation. If this is "both",
+for now both diffs will be run and statistics will be generateted in
+a file in $TMPDIR. This is a risky setting; help in trying it
+is appreciated. If it is "old" the old implementation is used,
+and if it is "new", just the new implementation is used.
+
+Default: 'old'.
 
 ## Code Lenses
 

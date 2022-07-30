@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"golang.org/x/tools/gopls/internal/hooks"
+	"golang.org/x/tools/internal/lsp/bug"
 	. "golang.org/x/tools/internal/lsp/regtest"
 
 	"golang.org/x/tools/internal/lsp/fake"
@@ -18,6 +19,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	bug.PanicOnBugs = true
 	Main(m, hooks.Options)
 }
 
@@ -527,7 +529,7 @@ func main() {
 }
 `
 	WithOptions(
-		EditorConfig{WindowsLineEndings: true},
+		WindowsLineEndings(),
 	).Run(t, src, func(t *testing.T, env *Env) {
 		// Trigger unimported completions for the example.com/blah package.
 		env.OpenFile("main.go")

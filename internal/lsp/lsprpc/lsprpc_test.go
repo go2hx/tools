@@ -58,9 +58,9 @@ func TestClientLogging(t *testing.T) {
 	client := FakeClient{Logs: make(chan string, 10)}
 
 	ctx = debug.WithInstance(ctx, "", "")
-	ss := NewStreamServer(cache.New(nil), false)
+	ss := NewStreamServer(cache.New(nil, nil, nil), false)
 	ss.serverForTest = server
-	ts := servertest.NewPipeServer(ctx, ss, nil)
+	ts := servertest.NewPipeServer(ss, nil)
 	defer checkClose(t, ts.Close)
 	cc := ts.Connect(ctx)
 	cc.Go(ctx, protocol.ClientHandler(client, jsonrpc2.MethodNotFound))
@@ -121,16 +121,15 @@ func checkClose(t *testing.T, closer func() error) {
 func setupForwarding(ctx context.Context, t *testing.T, s protocol.Server) (direct, forwarded servertest.Connector, cleanup func()) {
 	t.Helper()
 	serveCtx := debug.WithInstance(ctx, "", "")
-	ss := NewStreamServer(cache.New(nil), false)
+	ss := NewStreamServer(cache.New(nil, nil, nil), false)
 	ss.serverForTest = s
 	tsDirect := servertest.NewTCPServer(serveCtx, ss, nil)
 
-	forwarderCtx := debug.WithInstance(ctx, "", "")
 	forwarder, err := NewForwarder("tcp;"+tsDirect.Addr, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tsForwarded := servertest.NewPipeServer(forwarderCtx, forwarder, nil)
+	tsForwarded := servertest.NewPipeServer(forwarder, nil)
 	return tsDirect, tsForwarded, func() {
 		checkClose(t, tsDirect.Close)
 		checkClose(t, tsForwarded.Close)
@@ -217,7 +216,7 @@ func TestDebugInfoLifecycle(t *testing.T) {
 	clientCtx := debug.WithInstance(baseCtx, "", "")
 	serverCtx := debug.WithInstance(baseCtx, "", "")
 
-	cache := cache.New(nil)
+	cache := cache.New(nil, nil, nil)
 	ss := NewStreamServer(cache, false)
 	tsBackend := servertest.NewTCPServer(serverCtx, ss, nil)
 
@@ -225,7 +224,7 @@ func TestDebugInfoLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tsForwarder := servertest.NewPipeServer(clientCtx, forwarder, nil)
+	tsForwarder := servertest.NewPipeServer(forwarder, nil)
 
 	conn1 := tsForwarder.Connect(clientCtx)
 	ed1, err := fake.NewEditor(sb, fake.EditorConfig{}).Connect(clientCtx, conn1, fake.ClientHooks{})

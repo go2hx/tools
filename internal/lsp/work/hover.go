@@ -7,13 +7,13 @@ package work
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"go/token"
 
 	"golang.org/x/mod/modfile"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/lsp/protocol"
 	"golang.org/x/tools/internal/lsp/source"
-	errors "golang.org/x/xerrors"
 )
 
 func Hover(ctx context.Context, snapshot source.Snapshot, fh source.FileHandle, position protocol.Position) (*protocol.Hover, error) {
@@ -28,20 +28,16 @@ func Hover(ctx context.Context, snapshot source.Snapshot, fh source.FileHandle, 
 	// Get the position of the cursor.
 	pw, err := snapshot.ParseWork(ctx, fh)
 	if err != nil {
-		return nil, errors.Errorf("getting go.work file handle: %w", err)
+		return nil, fmt.Errorf("getting go.work file handle: %w", err)
 	}
-	spn, err := pw.Mapper.PointSpan(position)
+	pos, err := pw.Mapper.Pos(position)
 	if err != nil {
-		return nil, errors.Errorf("computing cursor position: %w", err)
-	}
-	hoverRng, err := spn.Range(pw.Mapper.Converter)
-	if err != nil {
-		return nil, errors.Errorf("computing hover range: %w", err)
+		return nil, fmt.Errorf("computing cursor position: %w", err)
 	}
 
 	// Confirm that the cursor is inside a use statement, and then find
 	// the position of the use statement's directory path.
-	use, pathStart, pathEnd := usePath(pw, hoverRng.Start)
+	use, pathStart, pathEnd := usePath(pw, pos)
 
 	// The cursor position is not on a use statement.
 	if use == nil {
@@ -51,11 +47,11 @@ func Hover(ctx context.Context, snapshot source.Snapshot, fh source.FileHandle, 
 	// Get the mod file denoted by the use.
 	modfh, err := snapshot.GetFile(ctx, modFileURI(pw, use))
 	if err != nil {
-		return nil, errors.Errorf("getting modfile handle: %w", err)
+		return nil, fmt.Errorf("getting modfile handle: %w", err)
 	}
 	pm, err := snapshot.ParseMod(ctx, modfh)
 	if err != nil {
-		return nil, errors.Errorf("getting modfile handle: %w", err)
+		return nil, fmt.Errorf("getting modfile handle: %w", err)
 	}
 	mod := pm.File.Module.Mod
 

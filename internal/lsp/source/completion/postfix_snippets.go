@@ -21,7 +21,6 @@ import (
 	"golang.org/x/tools/internal/lsp/protocol"
 	"golang.org/x/tools/internal/lsp/snippet"
 	"golang.org/x/tools/internal/lsp/source"
-	errors "golang.org/x/xerrors"
 )
 
 // Postfix snippets are artificial methods that allow the user to
@@ -151,6 +150,14 @@ for {{.VarName .KeyType "k"}}, {{.VarName .ElemType "v"}} := range {{.X}} {
 }
 {{end}}`,
 }, {
+	label:   "range",
+	details: "range over channel",
+	body: `{{if and (eq .Kind "chan") .StmtOK -}}
+for {{.VarName .ElemType "e"}} := range {{.X}} {
+	{{.Cursor}}
+}
+{{- end}}`,
+}, {
 	label:   "var",
 	details: "assign to variables",
 	body: `{{if and (eq .Kind "tuple") .StmtOK -}}
@@ -200,7 +207,7 @@ func (a *postfixTmplArgs) Cursor() string {
 func (a *postfixTmplArgs) Import(path string) (string, error) {
 	name, edits, err := a.importIfNeeded(path, a.scope)
 	if err != nil {
-		return "", errors.Errorf("couldn't import %q: %w", path, err)
+		return "", fmt.Errorf("couldn't import %q: %w", path, err)
 	}
 	a.edits = append(a.edits, edits...)
 	return name, nil

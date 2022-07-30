@@ -6,6 +6,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -16,10 +17,11 @@ import (
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/internal/event"
+	"golang.org/x/tools/internal/lsp/bug"
 	"golang.org/x/tools/internal/lsp/protocol"
+	"golang.org/x/tools/internal/lsp/safetoken"
 	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/internal/typeparams"
-	errors "golang.org/x/xerrors"
 )
 
 // IdentifierInfo holds information about an identifier in Go source.
@@ -75,7 +77,7 @@ type Declaration struct {
 
 // Identifier returns identifier information for a position
 // in a file, accounting for a potentially incomplete selector.
-func Identifier(ctx context.Context, snapshot Snapshot, fh FileHandle, pos protocol.Position) (*IdentifierInfo, error) {
+func Identifier(ctx context.Context, snapshot Snapshot, fh FileHandle, position protocol.Position) (*IdentifierInfo, error) {
 	ctx, done := event.Start(ctx, "source.Identifier")
 	defer done()
 
@@ -97,18 +99,17 @@ func Identifier(ctx context.Context, snapshot Snapshot, fh FileHandle, pos proto
 	for _, pkg := range pkgs {
 		pgf, err := pkg.File(fh.URI())
 		if err != nil {
+			// We shouldn't get a package from PackagesForFile that doesn't actually
+			// contain the file.
+			bug.Report("missing package file", bug.Data{"pkg": pkg.ID(), "file": fh.URI()})
 			return nil, err
 		}
-		spn, err := pgf.Mapper.PointSpan(pos)
-		if err != nil {
-			return nil, err
-		}
-		rng, err := spn.Range(pgf.Mapper.Converter)
+		pos, err := pgf.Mapper.Pos(position)
 		if err != nil {
 			return nil, err
 		}
 		var ident *IdentifierInfo
-		ident, findErr = findIdentifier(ctx, snapshot, pkg, pgf, rng.Start)
+		ident, findErr = findIdentifier(ctx, snapshot, pkg, pgf, pos)
 		if findErr == nil {
 			return ident, nil
 		}
@@ -116,7 +117,7 @@ func Identifier(ctx context.Context, snapshot Snapshot, fh FileHandle, pos proto
 	return nil, findErr
 }
 
-// ErrNoIdentFound is error returned when no identifer is found at a particular position
+// ErrNoIdentFound is error returned when no identifier is found at a particular position
 var ErrNoIdentFound = errors.New("no identifier found")
 
 func findIdentifier(ctx context.Context, snapshot Snapshot, pkg Package, pgf *ParsedGoFile, pos token.Pos) (*IdentifierInfo, error) {
@@ -199,7 +200,7 @@ func findIdentifier(ctx context.Context, snapshot Snapshot, pkg Package, pgf *Pa
 			result.Declaration.typeSwitchImplicit = typ
 		} else {
 			// Probably a type error.
-			return nil, errors.Errorf("%w for ident %v", errNoObjectFound, result.Name)
+			return nil, fmt.Errorf("%w for ident %v", errNoObjectFound, result.Name)
 		}
 	}
 
@@ -215,7 +216,7 @@ func findIdentifier(ctx context.Context, snapshot Snapshot, pkg Package, pgf *Pa
 		}
 		decl, ok := builtinObj.Decl.(ast.Node)
 		if !ok {
-			return nil, errors.Errorf("no declaration for %s", result.Name)
+			return nil, fmt.Errorf("no declaration for %s", result.Name)
 		}
 		result.Declaration.node = decl
 		if typeSpec, ok := decl.(*ast.TypeSpec); ok {
@@ -225,7 +226,7 @@ func findIdentifier(ctx context.Context, snapshot Snapshot, pkg Package, pgf *Pa
 
 		// The builtin package isn't in the dependency graph, so the usual
 		// utilities won't work here.
-		rng := NewMappedRange(snapshot.FileSet(), builtin.Mapper, decl.Pos(), decl.Pos()+token.Pos(len(result.Name)))
+		rng := NewMappedRange(builtin.Tok, builtin.Mapper, decl.Pos(), decl.Pos()+token.Pos(len(result.Name)))
 		result.Declaration.MappedRange = append(result.Declaration.MappedRange, rng)
 		return result, nil
 	}
@@ -247,7 +248,7 @@ func findIdentifier(ctx context.Context, snapshot Snapshot, pkg Package, pgf *Pa
 			}
 			decl, ok := builtinObj.Decl.(ast.Node)
 			if !ok {
-				return nil, errors.Errorf("no declaration for %s", errorName)
+				return nil, fmt.Errorf("no declaration for %s", errorName)
 			}
 			spec, ok := decl.(*ast.TypeSpec)
 			if !ok {
@@ -266,7 +267,7 @@ func findIdentifier(ctx context.Context, snapshot Snapshot, pkg Package, pgf *Pa
 			}
 			name := method.Names[0].Name
 			result.Declaration.node = method
-			rng := NewMappedRange(snapshot.FileSet(), builtin.Mapper, method.Pos(), method.Pos()+token.Pos(len(name)))
+			rng := NewMappedRange(builtin.Tok, builtin.Mapper, method.Pos(), method.Pos()+token.Pos(len(name)))
 			result.Declaration.MappedRange = append(result.Declaration.MappedRange, rng)
 			return result, nil
 		}
@@ -291,9 +292,8 @@ func findIdentifier(ctx context.Context, snapshot Snapshot, pkg Package, pgf *Pa
 	if err != nil {
 		return nil, err
 	}
-	if result.Declaration.node, err = snapshot.PosToDecl(ctx, declPkg, result.Declaration.obj.Pos()); err != nil {
-		return nil, err
-	}
+	result.Declaration.node, _ = FindDeclAndField(declPkg.GetSyntax(), result.Declaration.obj.Pos()) // may be nil
+
 	// Ensure that we have the full declaration, in case the declaration was
 	// parsed in ParseExported and therefore could be missing information.
 	if result.Declaration.fullDecl, err = fullNode(snapshot, result.Declaration.obj, declPkg); err != nil {
@@ -348,7 +348,7 @@ func fullNode(snapshot Snapshot, obj types.Object, pkg Package) (ast.Decl, error
 		fset := snapshot.FileSet()
 		file2, _ := parser.ParseFile(fset, tok.Name(), pgf.Src, parser.AllErrors|parser.ParseComments)
 		if file2 != nil {
-			offset, err := Offset(tok, obj.Pos())
+			offset, err := safetoken.Offset(tok, obj.Pos())
 			if err != nil {
 				return nil, err
 			}
@@ -473,7 +473,7 @@ func importSpec(snapshot Snapshot, pkg Package, file *ast.File, pos token.Pos) (
 	}
 	importPath, err := strconv.Unquote(imp.Path.Value)
 	if err != nil {
-		return nil, errors.Errorf("import path not quoted: %s (%v)", imp.Path.Value, err)
+		return nil, fmt.Errorf("import path not quoted: %s (%v)", imp.Path.Value, err)
 	}
 	result := &IdentifierInfo{
 		Snapshot: snapshot,

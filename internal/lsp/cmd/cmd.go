@@ -32,7 +32,6 @@ import (
 	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/internal/tool"
 	"golang.org/x/tools/internal/xcontext"
-	errors "golang.org/x/xerrors"
 )
 
 // Application is the main application as passed to tool.Main
@@ -246,6 +245,7 @@ func (app *Application) mainCommands() []tool.Application {
 		&app.Serve,
 		&version{app: app},
 		&bug{app: app},
+		&help{app: app},
 		&apiJSON{app: app},
 		&licenses{app: app},
 	}
@@ -286,7 +286,7 @@ func (app *Application) connect(ctx context.Context) (*connection, error) {
 	switch {
 	case app.Remote == "":
 		connection := newConnection(app)
-		connection.Server = lsp.NewServer(cache.New(app.options).NewSession(ctx), connection.Client)
+		connection.Server = lsp.NewServer(cache.New(nil, nil, app.options).NewSession(ctx), connection.Client)
 		ctx = protocol.WithClient(ctx, connection.Client)
 		return connection, connection.initialize(ctx, app.options)
 	case strings.HasPrefix(app.Remote, "internal@"):
@@ -540,16 +540,15 @@ func (c *cmdClient) getFile(ctx context.Context, uri span.URI) *cmdFile {
 		fname := uri.Filename()
 		content, err := ioutil.ReadFile(fname)
 		if err != nil {
-			file.err = errors.Errorf("getFile: %v: %v", uri, err)
+			file.err = fmt.Errorf("getFile: %v: %v", uri, err)
 			return file
 		}
 		f := c.fset.AddFile(fname, -1, len(content))
 		f.SetLinesForContent(content)
-		converter := span.NewContentConverter(fname, content)
 		file.mapper = &protocol.ColumnMapper{
-			URI:       uri,
-			Converter: converter,
-			Content:   content,
+			URI:     uri,
+			TokFile: f,
+			Content: content,
 		}
 	}
 	return file
@@ -580,7 +579,7 @@ func (c *connection) AddFile(ctx context.Context, uri span.URI) *cmdFile {
 		},
 	}
 	if err := c.Server.DidOpen(ctx, p); err != nil {
-		file.err = errors.Errorf("%v: %v", uri, err)
+		file.err = fmt.Errorf("%v: %v", uri, err)
 	}
 	return file
 }

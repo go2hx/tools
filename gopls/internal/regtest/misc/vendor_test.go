@@ -5,7 +5,6 @@
 package misc
 
 import (
-	"runtime"
 	"testing"
 
 	. "golang.org/x/tools/internal/lsp/regtest"
@@ -27,9 +26,6 @@ var Goodbye error
 
 func TestInconsistentVendoring(t *testing.T) {
 	testenv.NeedsGo1Point(t, 14)
-	if runtime.GOOS == "windows" {
-		t.Skipf("skipping test due to flakiness on Windows: https://golang.org/issue/49646")
-	}
 
 	const pkgThatUsesVendoring = `
 -- go.mod --
@@ -53,7 +49,7 @@ func _() {
 }
 `
 	WithOptions(
-		Modes(Singleton),
+		Modes(Default),
 		ProxyFiles(basicProxy),
 	).Run(t, pkgThatUsesVendoring, func(t *testing.T, env *Env) {
 		env.OpenFile("a/a1.go")

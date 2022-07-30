@@ -19,6 +19,7 @@ import (
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/internal/lsp/analysis/stubmethods"
 	"golang.org/x/tools/internal/lsp/protocol"
+	"golang.org/x/tools/internal/lsp/safetoken"
 	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/internal/typeparams"
 )
@@ -57,8 +58,8 @@ func stubSuggestedFixFunc(ctx context.Context, snapshot Snapshot, fh VersionedFi
 	if err != nil {
 		return nil, fmt.Errorf("error reading concrete file source: %w", err)
 	}
-	insertPos := snapshot.FileSet().Position(nodes[1].End()).Offset
-	if insertPos >= len(concreteSrc) {
+	insertPos, err := safetoken.Offset(parsedConcreteFile.Tok, nodes[1].End())
+	if err != nil || insertPos >= len(concreteSrc) {
 		return nil, fmt.Errorf("insertion position is past the end of the file")
 	}
 	var buf bytes.Buffer
@@ -85,7 +86,7 @@ func stubSuggestedFixFunc(ctx context.Context, snapshot Snapshot, fh VersionedFi
 	}
 	var edits []analysis.TextEdit
 	for _, edit := range diffEdits {
-		rng, err := edit.Span.Range(parsedConcreteFile.Mapper.Converter)
+		rng, err := edit.Span.Range(parsedConcreteFile.Mapper.TokFile)
 		if err != nil {
 			return nil, err
 		}
@@ -179,10 +180,11 @@ type methodData struct {
 }
 
 // printStubMethod takes methodData and returns Go code that represents the given method such as:
-// 	// {{ .Method }} implements {{ .Interface }}
-// 	func ({{ .Concrete }}) {{ .Method }}{{ .Signature }} {
-// 		panic("unimplemented")
-// 	}
+//
+//	// {{ .Method }} implements {{ .Interface }}
+//	func ({{ .Concrete }}) {{ .Method }}{{ .Signature }} {
+//		panic("unimplemented")
+//	}
 func printStubMethod(md methodData) []byte {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "// %s implements %s\n", md.Method, md.Interface)
@@ -217,7 +219,7 @@ func getStubNodes(pgf *ParsedGoFile, pRng protocol.Range) ([]ast.Node, token.Pos
 	if err != nil {
 		return nil, 0, err
 	}
-	rng, err := spn.Range(pgf.Mapper.Converter)
+	rng, err := spn.Range(pgf.Mapper.TokFile)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -229,22 +231,25 @@ func getStubNodes(pgf *ParsedGoFile, pRng protocol.Range) ([]ast.Node, token.Pos
 missingMethods takes a concrete type and returns any missing methods for the given interface as well as
 any missing interface that might have been embedded to its parent. For example:
 
-type I interface {
-	io.Writer
-	Hello()
-}
-returns []*missingInterface{
-	{
-		iface: *types.Interface (io.Writer),
-		file: *ast.File: io.go,
-		missing []*types.Func{Write},
-	},
-	{
-		iface: *types.Interface (I),
-		file: *ast.File: myfile.go,
-		missing: []*types.Func{Hello}
-	},
-}
+	type I interface {
+		io.Writer
+		Hello()
+	}
+
+returns
+
+	[]*missingInterface{
+		{
+			iface: *types.Interface (io.Writer),
+			file: *ast.File: io.go,
+			missing []*types.Func{Write},
+		},
+		{
+			iface: *types.Interface (I),
+			file: *ast.File: myfile.go,
+			missing: []*types.Func{Hello}
+		},
+	}
 */
 func missingMethods(ctx context.Context, snapshot Snapshot, concMS *types.MethodSet, concPkg *types.Package, ifaceObj types.Object, ifacePkg Package, visited map[string]struct{}) ([]*missingInterface, error) {
 	iface, ok := ifaceObj.Type().Underlying().(*types.Interface)

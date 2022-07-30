@@ -6,6 +6,7 @@ package completion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/doc"
@@ -20,7 +21,6 @@ import (
 	"golang.org/x/tools/internal/lsp/source"
 	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/internal/typeparams"
-	errors "golang.org/x/xerrors"
 )
 
 var (
@@ -242,10 +242,7 @@ Suffixes:
 		return item, nil
 	}
 
-	decl, err := c.snapshot.PosToDecl(ctx, pkg, obj.Pos())
-	if err != nil {
-		return CompletionItem{}, err
-	}
+	decl, _ := source.FindDeclAndField(pkg.GetSyntax(), obj.Pos()) // may be nil
 	hover, err := source.FindHoverContext(ctx, c.snapshot, pkg, obj, decl, nil)
 	if err != nil {
 		event.Error(ctx, "failed to find Hover", err, tag.URI.Of(uri))

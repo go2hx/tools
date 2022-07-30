@@ -7,6 +7,7 @@ package lsp
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,7 +25,6 @@ import (
 	"golang.org/x/tools/internal/lsp/work"
 	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/internal/xcontext"
-	errors "golang.org/x/xerrors"
 )
 
 // diagnosticSource differentiates different sources of diagnostics.
@@ -66,6 +66,8 @@ func (d diagnosticSource) String() string {
 		return "FromTypeChecking"
 	case orphanedSource:
 		return "FromOrphans"
+	case workSource:
+		return "FromGoWork"
 	default:
 		return fmt.Sprintf("From?%d?", d)
 	}
@@ -412,7 +414,7 @@ func (s *Server) showCriticalErrorStatus(ctx context.Context, snapshot source.Sn
 	var errMsg string
 	if err != nil {
 		event.Error(ctx, "errors loading workspace", err.MainError, tag.Snapshot.Of(snapshot.ID()), tag.Directory.Of(snapshot.View().Folder()))
-		for _, d := range err.DiagList {
+		for _, d := range err.Diagnostics {
 			s.storeDiagnostics(snapshot, d.URI, modSource, []*source.Diagnostic{d})
 		}
 		errMsg = strings.ReplaceAll(err.MainError.Error(), "\n", " ")
@@ -428,10 +430,10 @@ func (s *Server) showCriticalErrorStatus(ctx context.Context, snapshot source.Sn
 	// If an error is already shown to the user, update it or mark it as
 	// resolved.
 	if errMsg == "" {
-		s.criticalErrorStatus.End("Done.")
+		s.criticalErrorStatus.End(ctx, "Done.")
 		s.criticalErrorStatus = nil
 	} else {
-		s.criticalErrorStatus.Report(errMsg, 0)
+		s.criticalErrorStatus.Report(ctx, errMsg, 0)
 	}
 }
 
@@ -439,6 +441,14 @@ func (s *Server) showCriticalErrorStatus(ctx context.Context, snapshot source.Sn
 // If they cannot and the workspace is not otherwise unloaded, it also surfaces
 // a warning, suggesting that the user check the file for build tags.
 func (s *Server) checkForOrphanedFile(ctx context.Context, snapshot source.Snapshot, fh source.VersionedFileHandle) *source.Diagnostic {
+	// TODO(rfindley): this function may fail to produce a diagnostic for a
+	// variety of reasons, some of which should probably not be ignored. For
+	// example, should this function be tolerant of the case where fh does not
+	// exist, or does not have a package name?
+	//
+	// It would be better to panic or report a bug in several of the cases below,
+	// so that we can move toward guaranteeing we show the user a meaningful
+	// error whenever it makes sense.
 	if snapshot.View().FileKind(fh) != source.Go {
 		return nil
 	}
@@ -454,7 +464,10 @@ func (s *Server) checkForOrphanedFile(ctx context.Context, snapshot source.Snaps
 	if err != nil {
 		return nil
 	}
-	spn, err := span.NewRange(snapshot.FileSet(), pgf.File.Name.Pos(), pgf.File.Name.End()).Span()
+	if !pgf.File.Name.Pos().IsValid() {
+		return nil
+	}
+	spn, err := span.NewRange(pgf.Tok, pgf.File.Name.Pos(), pgf.File.Name.End()).Span()
 	if err != nil {
 		return nil
 	}

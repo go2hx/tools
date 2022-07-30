@@ -69,7 +69,7 @@ type FoldingRanges []span.Span
 type Formats []span.Span
 type Imports []span.Span
 type SemanticTokens []span.Span
-type SuggestedFixes map[span.Span][]string
+type SuggestedFixes map[span.Span][]SuggestedFix
 type FunctionExtractions map[span.Span]span.Span
 type MethodExtractions map[span.Span]span.Span
 type Definitions map[span.Span]Definition
@@ -81,6 +81,7 @@ type PrepareRenames map[span.Span]*source.PrepareItem
 type Symbols map[span.URI][]protocol.DocumentSymbol
 type SymbolsChildren map[string][]protocol.DocumentSymbol
 type SymbolInformation map[span.Span]protocol.SymbolInformation
+type InlayHints []span.Span
 type WorkspaceSymbols map[WorkspaceSymbolsTestType]map[span.URI][]string
 type Signatures map[span.Span]*protocol.SignatureHelp
 type Links map[span.URI][]Link
@@ -113,6 +114,7 @@ type Data struct {
 	Highlights               Highlights
 	References               References
 	Renames                  Renames
+	InlayHints               InlayHints
 	PrepareRenames           PrepareRenames
 	Symbols                  Symbols
 	symbolsChildren          SymbolsChildren
@@ -150,12 +152,13 @@ type Tests interface {
 	Format(*testing.T, span.Span)
 	Import(*testing.T, span.Span)
 	SemanticTokens(*testing.T, span.Span)
-	SuggestedFix(*testing.T, span.Span, []string, int)
+	SuggestedFix(*testing.T, span.Span, []SuggestedFix, int)
 	FunctionExtraction(*testing.T, span.Span, span.Span)
 	MethodExtraction(*testing.T, span.Span, span.Span)
 	Definition(*testing.T, span.Span, Definition)
 	Implementation(*testing.T, span.Span, []span.Span)
 	Highlight(*testing.T, span.Span, []span.Span)
+	InlayHints(*testing.T, span.Span)
 	References(*testing.T, span.Span, []span.Span)
 	Rename(*testing.T, span.Span, string)
 	PrepareRename(*testing.T, span.Span, *source.PrepareItem)
@@ -229,6 +232,10 @@ type Link struct {
 	NotePosition token.Position
 }
 
+type SuggestedFix struct {
+	ActionKind, Title string
+}
+
 type Golden struct {
 	Filename string
 	Archive  *txtar.Archive
@@ -262,6 +269,7 @@ func DefaultOptions(o *source.Options) {
 	o.HierarchicalDocumentSymbolSupport = true
 	o.ExperimentalWorkspaceModule = true
 	o.SemanticTokens = true
+	o.InternalOptions.NewDiff = "both"
 }
 
 func RunTests(t *testing.T, dataDir string, includeMultiModule bool, f func(*testing.T, *Data)) {
@@ -466,6 +474,7 @@ func load(t testing.TB, mode string, dir string) *Data {
 		"hoverdef":        datum.collectHoverDefinitions,
 		"hover":           datum.collectHovers,
 		"highlight":       datum.collectHighlights,
+		"inlayHint":       datum.collectInlayHints,
 		"refs":            datum.collectReferences,
 		"rename":          datum.collectRenames,
 		"prepare":         datum.collectPrepareRenames,
@@ -782,6 +791,16 @@ func Run(t *testing.T, tests Tests, data *Data) {
 		}
 	})
 
+	t.Run("InlayHints", func(t *testing.T) {
+		t.Helper()
+		for _, src := range data.InlayHints {
+			t.Run(SpanName(src), func(t *testing.T) {
+				t.Helper()
+				tests.InlayHints(t, src)
+			})
+		}
+	})
+
 	t.Run("References", func(t *testing.T) {
 		t.Helper()
 		for src, itemList := range data.References {
@@ -970,6 +989,7 @@ func checkData(t *testing.T, data *Data) {
 	fmt.Fprintf(buf, "DefinitionsCount = %v\n", definitionCount)
 	fmt.Fprintf(buf, "TypeDefinitionsCount = %v\n", typeDefinitionCount)
 	fmt.Fprintf(buf, "HighlightsCount = %v\n", len(data.Highlights))
+	fmt.Fprintf(buf, "InlayHintsCount = %v\n", len(data.InlayHints))
 	fmt.Fprintf(buf, "ReferencesCount = %v\n", len(data.References))
 	fmt.Fprintf(buf, "RenamesCount = %v\n", len(data.Renames))
 	fmt.Fprintf(buf, "PrepareRenamesCount = %v\n", len(data.PrepareRenames))
@@ -997,12 +1017,7 @@ func (data *Data) Mapper(uri span.URI) (*protocol.ColumnMapper, error) {
 		if err != nil {
 			return nil, err
 		}
-		converter := span.NewContentConverter(uri.Filename(), content)
-		data.mappers[uri] = &protocol.ColumnMapper{
-			URI:       uri,
-			Converter: converter,
-			Content:   content,
-		}
+		data.mappers[uri] = protocol.NewColumnMapper(uri, content)
 	}
 	return data.mappers[uri], nil
 }
@@ -1187,11 +1202,8 @@ func (data *Data) collectSemanticTokens(spn span.Span) {
 	data.SemanticTokens = append(data.SemanticTokens, spn)
 }
 
-func (data *Data) collectSuggestedFixes(spn span.Span, actionKind string) {
-	if _, ok := data.SuggestedFixes[spn]; !ok {
-		data.SuggestedFixes[spn] = []string{}
-	}
-	data.SuggestedFixes[spn] = append(data.SuggestedFixes[spn], actionKind)
+func (data *Data) collectSuggestedFixes(spn span.Span, actionKind, fix string) {
+	data.SuggestedFixes[spn] = append(data.SuggestedFixes[spn], SuggestedFix{actionKind, fix})
 }
 
 func (data *Data) collectFunctionExtractions(start span.Span, end span.Span) {
@@ -1295,6 +1307,10 @@ func (data *Data) collectDefinitionNames(src span.Span, name string) {
 func (data *Data) collectHighlights(src span.Span, expected []span.Span) {
 	// Declaring a highlight in a test file: @highlight(src, expected1, expected2)
 	data.Highlights[src] = append(data.Highlights[src], expected...)
+}
+
+func (data *Data) collectInlayHints(src span.Span) {
+	data.InlayHints = append(data.InlayHints, src)
 }
 
 func (data *Data) collectReferences(src span.Span, expected []span.Span) {

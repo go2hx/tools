@@ -7,7 +7,7 @@
 // Package protocol contains data types and code for LSP json rpcs
 // generated automatically from vscode-languageserver-node
 // commit: 696f9285bf849b73745682fdb1c1feac73eb8772
-// last fetched Fri Mar 04 2022 14:48:10 GMT-0500 (Eastern Standard Time)
+// last fetched Fri Apr 01 2022 10:53:41 GMT-0400 (Eastern Daylight Time)
 package protocol
 
 import "encoding/json"
@@ -2745,6 +2745,14 @@ type InlayHint = struct {
 	 */
 	Kind InlayHintKind `json:"kind,omitempty"`
 	/**
+	 * Optional text edits that are performed when accepting this inlay hint.
+	 *
+	 * *Note* that edits are expected to change the document so that the inlay
+	 * hint (or its nearest variant) is now part of the document and the inlay
+	 * hint itself is now obsolete.
+	 */
+	TextEdits []TextEdit `json:"textEdits,omitempty"`
+	/**
 	 * The tooltip text when you hover over this item.
 	 */
 	Tooltip string/*string | MarkupContent*/ `json:"tooltip,omitempty"`
@@ -2866,7 +2874,7 @@ type InlayHintParams struct {
 	/**
 	 * The visible document range for which inlay hints should be computed.
 	 */
-	ViewPort Range `json:"viewPort"`
+	Range Range `json:"range"`
 }
 
 /**
@@ -2988,7 +2996,7 @@ type InlineValueParams struct {
 	/**
 	 * The visible document range for which inline values should be computed.
 	 */
-	ViewPort Range `json:"viewPort"`
+	Range Range `json:"range"`
 	/**
 	 * Additional information about the context in which inline values were
 	 * requested.
