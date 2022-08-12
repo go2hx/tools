@@ -43,6 +43,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/structtag"
 	"golang.org/x/tools/go/analysis/passes/testinggoroutine"
 	"golang.org/x/tools/go/analysis/passes/tests"
+	"golang.org/x/tools/go/analysis/passes/timeformat"
 	"golang.org/x/tools/go/analysis/passes/unmarshal"
 	"golang.org/x/tools/go/analysis/passes/unreachable"
 	"golang.org/x/tools/go/analysis/passes/unsafeptr"
@@ -118,7 +119,7 @@ func DefaultOptions() *Options {
 					ExpandWorkspaceToModule:     true,
 					ExperimentalPackageCacheKey: true,
 					MemoryMode:                  ModeNormal,
-					DirectoryFilters:            []string{"-node_modules"},
+					DirectoryFilters:            []string{"-**/node_modules"},
 					TemplateExtensions:          []string{},
 				},
 				UIOptions: UIOptions{
@@ -154,6 +155,7 @@ func DefaultOptions() *Options {
 						string(command.GCDetails):         false,
 						string(command.UpgradeDependency): true,
 						string(command.Vendor):            true,
+						// TODO(hyangah): enable command.RunVulncheckExp.
 					},
 				},
 			},
@@ -230,9 +232,13 @@ type BuildOptions struct {
 	// the last filter that applies to a path controls whether it is included.
 	// The path prefix can be empty, so an initial `-` excludes everything.
 	//
+	// DirectoryFilters also supports the `**` operator to match 0 or more directories.
+	//
 	// Examples:
 	//
-	// Exclude node_modules: `-node_modules`
+	// Exclude node_modules at current depth: `-node_modules`
+	//
+	// Exclude node_modules at any depth: `-**/node_modules`
 	//
 	// Include only project_a: `-` (exclude everything), `+project_a`
 	//
@@ -316,6 +322,12 @@ type UIOptions struct {
 	// SemanticTokens controls whether the LSP server will send
 	// semantic tokens to the client.
 	SemanticTokens bool `status:"experimental"`
+
+	// NoSemanticString turns off the sending of the semantic token 'string'
+	NoSemanticString bool `status:"experimental"`
+
+	// NoSemanticNumber  turns off the sending of the semantic token 'number'
+	NoSemanticNumber bool `status:"experimental"`
 }
 
 type CompletionOptions struct {
@@ -507,7 +519,7 @@ type Hooks struct {
 	StaticcheckAnalyzers map[string]*Analyzer
 
 	// Govulncheck is the implementation of the Govulncheck gopls command.
-	Govulncheck func(context.Context, *packages.Config, command.VulncheckArgs) (command.VulncheckResult, error)
+	Govulncheck func(context.Context, *packages.Config, string) (command.VulncheckResult, error)
 }
 
 // InternalOptions contains settings that are not intended for use by the
@@ -573,6 +585,16 @@ type InternalOptions struct {
 	// that the new algorithm has worked, and write some summary
 	// statistics to a file in os.TmpDir()
 	NewDiff string
+
+	// ChattyDiagnostics controls whether to report file diagnostics for each
+	// file change. If unset, gopls only reports diagnostics when they change, or
+	// when a file is opened or closed.
+	//
+	// TODO(rfindley): is seems that for many clients this should be true by
+	// default. For example, coc.nvim seems to get confused if diagnostics are
+	// not re-published. Switch the default to true after some period of internal
+	// testing.
+	ChattyDiagnostics bool
 }
 
 type ImportShortcut string
@@ -802,10 +824,10 @@ func (o *Options) AddStaticcheckAnalyzer(a *analysis.Analyzer, enabled bool, sev
 // should be enabled in enableAllExperimentMaps.
 func (o *Options) EnableAllExperiments() {
 	o.SemanticTokens = true
-	o.ExperimentalPostfixCompletions = true
 	o.ExperimentalUseInvalidMetadata = true
 	o.ExperimentalWatchedFileDelay = 50 * time.Millisecond
-	o.SymbolMatcher = SymbolFastFuzzy
+	o.NewDiff = "checked"
+	o.ChattyDiagnostics = true
 }
 
 func (o *Options) enableAllExperimentMaps() {
@@ -829,7 +851,7 @@ func validateDirectoryFilter(ifilter string) (string, error) {
 	if filter == "" || (filter[0] != '+' && filter[0] != '-') {
 		return "", fmt.Errorf("invalid filter %v, must start with + or -", filter)
 	}
-	segs := strings.Split(filter, "/")
+	segs := strings.Split(filter[1:], "/")
 	unsupportedOps := [...]string{"?", "*"}
 	for _, seg := range segs {
 		if seg != "**" {
@@ -1022,6 +1044,12 @@ func (o *Options) set(name string, value interface{}, seen map[string]struct{}) 
 	case "semanticTokens":
 		result.setBool(&o.SemanticTokens)
 
+	case "noSemanticString":
+		result.setBool(&o.NoSemanticString)
+
+	case "noSemanticNumber":
+		result.setBool(&o.NoSemanticNumber)
+
 	case "expandWorkspaceToModule":
 		result.setBool(&o.ExpandWorkspaceToModule)
 
@@ -1075,6 +1103,9 @@ func (o *Options) set(name string, value interface{}, seen map[string]struct{}) 
 
 	case "newDiff":
 		result.setString(&o.NewDiff)
+
+	case "chattyDiagnostics":
+		result.setBool(&o.ChattyDiagnostics)
 
 	// Replaced settings.
 	case "experimentalDisabledAnalyses":
@@ -1380,6 +1411,7 @@ func defaultAnalyzers() map[string]*Analyzer {
 		useany.Analyzer.Name:           {Analyzer: useany.Analyzer, Enabled: false},
 		infertypeargs.Analyzer.Name:    {Analyzer: infertypeargs.Analyzer, Enabled: true},
 		embeddirective.Analyzer.Name:   {Analyzer: embeddirective.Analyzer, Enabled: true},
+		timeformat.Analyzer.Name:       {Analyzer: timeformat.Analyzer, Enabled: true},
 
 		// gofmt -s suite:
 		simplifycompositelit.Analyzer.Name: {

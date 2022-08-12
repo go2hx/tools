@@ -63,15 +63,19 @@ relative to the workspace folder. They are evaluated in order, and
 the last filter that applies to a path controls whether it is included.
 The path prefix can be empty, so an initial `-` excludes everything.
 
+DirectoryFilters also supports the `**` operator to match 0 or more directories.
+
 Examples:
 
-Exclude node_modules: `-node_modules`
+Exclude node_modules at current depth: `-node_modules`
+
+Exclude node_modules at any depth: `-**/node_modules`
 
 Include only project_a: `-` (exclude everything), `+project_a`
 
 Include only project_a, but not node_modules inside it: `-`, `+project_a`, `-project_a/node_modules`
 
-Default: `["-node_modules"]`.
+Default: `["-**/node_modules"]`.
 
 #### **templateExtensions** *[]string*
 
@@ -212,6 +216,22 @@ Default: `{"gc_details":false,"generate":true,"regenerate_cgo":true,"tidy":true,
 
 semanticTokens controls whether the LSP server will send
 semantic tokens to the client.
+
+Default: `false`.
+
+#### **noSemanticString** *bool*
+
+**This setting is experimental and may be deleted.**
+
+noSemanticString turns off the sending of the semantic token 'string'
+
+Default: `false`.
+
+#### **noSemanticNumber** *bool*
+
+**This setting is experimental and may be deleted.**
+
+noSemanticNumber  turns off the sending of the semantic token 'number'
 
 Default: `false`.
 
@@ -487,6 +507,11 @@ Runs `go generate` for a given directory.
 Identifier: `regenerate_cgo`
 
 Regenerates cgo definitions.
+### **Run vulncheck (experimental)**
+
+Identifier: `run_vulncheck_exp`
+
+Run vulnerability check (`govulncheck`).
 ### **Run test(s) (legacy)**
 
 Identifier: `test`

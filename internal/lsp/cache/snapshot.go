@@ -274,7 +274,24 @@ func (s *snapshot) Templates() map[span.URI]source.VersionedFileHandle {
 }
 
 func (s *snapshot) ValidBuildConfiguration() bool {
-	return validBuildConfiguration(s.view.rootURI, &s.view.workspaceInformation, s.workspace.getActiveModFiles())
+	// Since we only really understand the `go` command, if the user has a
+	// different GOPACKAGESDRIVER, assume that their configuration is valid.
+	if s.view.hasGopackagesDriver {
+		return true
+	}
+	// Check if the user is working within a module or if we have found
+	// multiple modules in the workspace.
+	if len(s.workspace.getActiveModFiles()) > 0 {
+		return true
+	}
+	// The user may have a multiple directories in their GOPATH.
+	// Check if the workspace is within any of them.
+	for _, gp := range filepath.SplitList(s.view.gopath) {
+		if source.InDir(filepath.Join(gp, "src"), s.view.rootURI.Filename()) {
+			return true
+		}
+	}
+	return false
 }
 
 // workspaceMode describes the way in which the snapshot's workspace should
@@ -419,6 +436,12 @@ func (s *snapshot) goCommandInvocation(ctx context.Context, flags source.Invocat
 	s.view.optionsMu.Lock()
 	allowModfileModificationOption := s.view.options.AllowModfileModifications
 	allowNetworkOption := s.view.options.AllowImplicitNetworkAccess
+
+	// TODO(rfindley): this is very hard to follow, and may not even be doing the
+	// right thing: should inv.Env really trample view.options? Do we ever invoke
+	// this with a non-empty inv.Env?
+	//
+	// We should refactor to make it clearer that the correct env is being used.
 	inv.Env = append(append(append(os.Environ(), s.view.options.EnvSlice()...), inv.Env...), "GO111MODULE="+s.view.effectiveGo111Module)
 	inv.BuildFlags = append([]string{}, s.view.options.BuildFlags...)
 	s.view.optionsMu.Unlock()
@@ -862,6 +885,10 @@ func (s *snapshot) fileWatchingGlobPatterns(ctx context.Context) map[string]stru
 	// applied to every folder in the workspace.
 	patterns := map[string]struct{}{
 		fmt.Sprintf("**/*.{%s}", extensions): {},
+	}
+
+	if s.view.explicitGowork != "" {
+		patterns[s.view.explicitGowork.Filename()] = struct{}{}
 	}
 
 	// Add a pattern for each Go module in the workspace that is not within the view.
@@ -1358,6 +1385,8 @@ func (s *snapshot) GetCriticalError(ctx context.Context) *source.CriticalError {
 		// with the user's workspace layout. Workspace packages that only have the
 		// ID "command-line-arguments" are usually a symptom of a bad workspace
 		// configuration.
+		//
+		// TODO(rfindley): re-evaluate this heuristic.
 		if containsCommandLineArguments(wsPkgs) {
 			return s.workspaceLayoutError(ctx)
 		}
@@ -1734,10 +1763,9 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 	}
 
 	// Compute invalidations based on file changes.
-	changedPkgFiles := map[PackageID]bool{} // packages whose file set may have changed
-	anyImportDeleted := false               // import deletions can resolve cycles
-	anyFileOpenedOrClosed := false          // opened files affect workspace packages
-	anyFileAdded := false                   // adding a file can resolve missing dependencies
+	anyImportDeleted := false      // import deletions can resolve cycles
+	anyFileOpenedOrClosed := false // opened files affect workspace packages
+	anyFileAdded := false          // adding a file can resolve missing dependencies
 
 	for uri, change := range changes {
 		// The original FileHandle for this URI is cached on the snapshot.
@@ -1762,11 +1790,6 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 
 		// Mark all of the package IDs containing the given file.
 		filePackageIDs := invalidatedPackageIDs(uri, s.meta.ids, pkgFileChanged)
-		if pkgFileChanged {
-			for id := range filePackageIDs {
-				changedPkgFiles[id] = true
-			}
-		}
 		for id := range filePackageIDs {
 			directIDs[id] = directIDs[id] || invalidateMetadata
 		}
@@ -1874,13 +1897,8 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		result.actions.Delete(key)
 	}
 
-	// If the workspace mode has changed, we must delete all metadata, as it
-	// is unusable and may produce confusing or incorrect diagnostics.
 	// If a file has been deleted, we must delete metadata for all packages
 	// containing that file.
-	workspaceModeChanged := s.workspaceMode() != result.workspaceMode()
-
-	// Don't keep package metadata for packages that have lost files.
 	//
 	// TODO(rfindley): why not keep invalid metadata in this case? If we
 	// otherwise allow operate on invalid metadata, why not continue to do so,
@@ -1907,11 +1925,27 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		result.shouldLoad[k] = v
 	}
 
+	// TODO(rfindley): consolidate the this workspace mode detection with
+	// workspace invalidation.
+	workspaceModeChanged := s.workspaceMode() != result.workspaceMode()
+
+	// We delete invalid metadata in the following cases:
+	// - If we are forcing a reload of metadata.
+	// - If the workspace mode has changed, as stale metadata may produce
+	//   confusing or incorrect diagnostics.
+	//
+	// TODO(rfindley): we should probably also clear metadata if we are
+	// reinitializing the workspace, as otherwise we could leave around a bunch
+	// of irrelevant and duplicate metadata (for example, if the module path
+	// changed). However, this breaks the "experimentalUseInvalidMetadata"
+	// feature, which relies on stale metadata when, for example, a go.mod file
+	// is broken via invalid syntax.
+	deleteInvalidMetadata := forceReloadMetadata || workspaceModeChanged
+
 	// Compute which metadata updates are required. We only need to invalidate
 	// packages directly containing the affected file, and only if it changed in
 	// a relevant way.
 	metadataUpdates := make(map[PackageID]*KnownMetadata)
-	deleteInvalidMetadata := forceReloadMetadata || workspaceModeChanged
 	for k, v := range s.meta.metadata {
 		invalidateMetadata := idsToInvalidate[k]
 
@@ -1942,13 +1976,11 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 
 		// Check if the metadata has changed.
 		valid := v.Valid && !invalidateMetadata
-		pkgFilesChanged := v.PkgFilesChanged || changedPkgFiles[k]
-		if valid != v.Valid || pkgFilesChanged != v.PkgFilesChanged {
+		if valid != v.Valid {
 			// Mark invalidated metadata rather than deleting it outright.
 			metadataUpdates[k] = &KnownMetadata{
-				Metadata:        v.Metadata,
-				Valid:           valid,
-				PkgFilesChanged: pkgFilesChanged,
+				Metadata: v.Metadata,
+				Valid:    valid,
 			}
 		}
 	}

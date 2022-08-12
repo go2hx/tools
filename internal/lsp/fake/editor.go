@@ -17,9 +17,11 @@ import (
 	"sync"
 
 	"golang.org/x/tools/internal/jsonrpc2"
+	"golang.org/x/tools/internal/jsonrpc2/servertest"
 	"golang.org/x/tools/internal/lsp/command"
 	"golang.org/x/tools/internal/lsp/protocol"
 	"golang.org/x/tools/internal/span"
+	"golang.org/x/tools/internal/xcontext"
 )
 
 // Editor is a fake editor client.  It keeps track of client state and can be
@@ -29,6 +31,7 @@ type Editor struct {
 	// Server, client, and sandbox are concurrency safe and written only
 	// at construction time, so do not require synchronization.
 	Server     protocol.Server
+	cancelConn func()
 	serverConn jsonrpc2.Conn
 	client     *Client
 	sandbox    *Sandbox
@@ -118,16 +121,21 @@ func NewEditor(sandbox *Sandbox, config EditorConfig) *Editor {
 //
 // It returns the editor, so that it may be called as follows:
 //
-//	editor, err := NewEditor(s).Connect(ctx, conn)
-func (e *Editor) Connect(ctx context.Context, conn jsonrpc2.Conn, hooks ClientHooks) (*Editor, error) {
+//	editor, err := NewEditor(s).Connect(ctx, conn, hooks)
+func (e *Editor) Connect(ctx context.Context, connector servertest.Connector, hooks ClientHooks) (*Editor, error) {
+	bgCtx, cancelConn := context.WithCancel(xcontext.Detach(ctx))
+	conn := connector.Connect(bgCtx)
+	e.cancelConn = cancelConn
+
 	e.serverConn = conn
 	e.Server = protocol.ServerDispatcher(conn)
 	e.client = &Client{editor: e, hooks: hooks}
-	conn.Go(ctx,
+	conn.Go(bgCtx,
 		protocol.Handlers(
 			protocol.ClientHandler(e.client,
 				jsonrpc2.MethodNotFound)))
-	if err := e.initialize(ctx, e.config.WorkspaceFolders); err != nil {
+
+	if err := e.initialize(ctx); err != nil {
 		return nil, err
 	}
 	e.sandbox.Workdir.AddWatcher(e.onFileChanges)
@@ -170,6 +178,10 @@ func (e *Editor) Close(ctx context.Context) error {
 	if err := e.Exit(ctx); err != nil {
 		return err
 	}
+	defer func() {
+		e.cancelConn()
+	}()
+
 	// called close on the editor should result in the connection closing
 	select {
 	case <-e.serverConn.Done():
@@ -185,11 +197,10 @@ func (e *Editor) Client() *Client {
 	return e.client
 }
 
-// settings builds the settings map for use in LSP settings
-// RPCs.
-func (e *Editor) settings() map[string]interface{} {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+// settingsLocked builds the settings map for use in LSP settings RPCs.
+//
+// e.mu must be held while calling this function.
+func (e *Editor) settingsLocked() map[string]interface{} {
 	env := make(map[string]string)
 	for k, v := range e.defaultEnv {
 		env[k] = v
@@ -228,26 +239,19 @@ func (e *Editor) settings() map[string]interface{} {
 	return settings
 }
 
-func (e *Editor) initialize(ctx context.Context, workspaceFolders []string) error {
+func (e *Editor) initialize(ctx context.Context) error {
 	params := &protocol.ParamInitialize{}
 	params.ClientInfo.Name = "fakeclient"
 	params.ClientInfo.Version = "v1.0.0"
-
-	if workspaceFolders == nil {
-		workspaceFolders = []string{string(e.sandbox.Workdir.RelativeTo)}
-	}
-	for _, folder := range workspaceFolders {
-		params.WorkspaceFolders = append(params.WorkspaceFolders, protocol.WorkspaceFolder{
-			URI:  string(e.sandbox.Workdir.URI(folder)),
-			Name: filepath.Base(folder),
-		})
-	}
-
+	e.mu.Lock()
+	params.WorkspaceFolders = e.makeWorkspaceFoldersLocked()
+	params.InitializationOptions = e.settingsLocked()
+	e.mu.Unlock()
 	params.Capabilities.Workspace.Configuration = true
 	params.Capabilities.Window.WorkDoneProgress = true
+
 	// TODO: set client capabilities
 	params.Capabilities.TextDocument.Completion.CompletionItem.TagSupport.ValueSet = []protocol.CompletionItemTag{protocol.ComplDeprecated}
-	params.InitializationOptions = e.settings()
 
 	params.Capabilities.TextDocument.Completion.CompletionItem.SnippetSupport = true
 	params.Capabilities.TextDocument.SemanticTokens.Requests.Full = true
@@ -282,6 +286,27 @@ func (e *Editor) initialize(ctx context.Context, workspaceFolders []string) erro
 	}
 	// TODO: await initial configuration here, or expect gopls to manage that?
 	return nil
+}
+
+// makeWorkspaceFoldersLocked creates a slice of workspace folders to use for
+// this editing session, based on the editor configuration.
+//
+// e.mu must be held while calling this function.
+func (e *Editor) makeWorkspaceFoldersLocked() (folders []protocol.WorkspaceFolder) {
+	paths := e.config.WorkspaceFolders
+	if len(paths) == 0 {
+		paths = append(paths, string(e.sandbox.Workdir.RelativeTo))
+	}
+
+	for _, path := range paths {
+		uri := string(e.sandbox.Workdir.URI(path))
+		folders = append(folders, protocol.WorkspaceFolder{
+			URI:  uri,
+			Name: filepath.Base(uri),
+		})
+	}
+
+	return folders
 }
 
 // onFileChanges is registered to be called by the Workdir on any writes that
@@ -1181,6 +1206,54 @@ func (e *Editor) ChangeConfiguration(ctx context.Context, newConfig EditorConfig
 		}
 	}
 	return nil
+}
+
+// ChangeWorkspaceFolders sets the new workspace folders, and sends a
+// didChangeWorkspaceFolders notification to the server.
+//
+// The given folders must all be unique.
+func (e *Editor) ChangeWorkspaceFolders(ctx context.Context, folders []string) error {
+	// capture existing folders so that we can compute the change.
+	e.mu.Lock()
+	oldFolders := e.makeWorkspaceFoldersLocked()
+	e.config.WorkspaceFolders = folders
+	newFolders := e.makeWorkspaceFoldersLocked()
+	e.mu.Unlock()
+
+	if e.Server == nil {
+		return nil
+	}
+
+	var params protocol.DidChangeWorkspaceFoldersParams
+
+	// Keep track of old workspace folders that must be removed.
+	toRemove := make(map[protocol.URI]protocol.WorkspaceFolder)
+	for _, folder := range oldFolders {
+		toRemove[folder.URI] = folder
+	}
+
+	// Sanity check: if we see a folder twice the algorithm below doesn't work,
+	// so track seen folders to ensure that we panic in that case.
+	seen := make(map[protocol.URI]protocol.WorkspaceFolder)
+	for _, folder := range newFolders {
+		if _, ok := seen[folder.URI]; ok {
+			panic(fmt.Sprintf("folder %s seen twice", folder.URI))
+		}
+
+		// If this folder already exists, we don't want to remove it.
+		// Otherwise, we need to add it.
+		if _, ok := toRemove[folder.URI]; ok {
+			delete(toRemove, folder.URI)
+		} else {
+			params.Event.Added = append(params.Event.Added, folder)
+		}
+	}
+
+	for _, v := range toRemove {
+		params.Event.Removed = append(params.Event.Removed, v)
+	}
+
+	return e.Server.DidChangeWorkspaceFolders(ctx, &params)
 }
 
 // CodeAction executes a codeAction request on the server.

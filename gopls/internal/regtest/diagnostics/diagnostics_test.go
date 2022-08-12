@@ -384,7 +384,7 @@ func main() {}
 			// completed.
 			OnceMet(
 				env.DoneWithChange(),
-				NoDiagnostics("a.go"),
+				EmptyDiagnostics("a.go"),
 			),
 		)
 	})
@@ -757,15 +757,20 @@ func _() {
 		env.OpenFile("a/a1.go")
 		env.CreateBuffer("a/a2.go", ``)
 		env.SaveBufferWithoutActions("a/a2.go")
+		// We can't use OnceMet here (at least, not easily) because the didSave
+		// races with the didChangeWatchedFiles.
+		//
+		// TODO(rfindley): add an AllOf expectation combinator, or an expectation
+		// that all notifications have been processed.
 		env.Await(
-			OnceMet(
-				env.DoneWithSave(),
-				NoDiagnostics("a/a1.go"),
-			),
+			EmptyDiagnostics("a/a1.go"),
 		)
 		env.EditBuffer("a/a2.go", fake.NewEdit(0, 0, 0, 0, `package a`))
 		env.Await(
-			OnceMet(env.DoneWithChange(), NoDiagnostics("a/a1.go")),
+			OnceMet(
+				env.DoneWithChange(),
+				EmptyDiagnostics("a/a1.go"),
+			),
 		)
 	})
 }
@@ -914,7 +919,7 @@ var _ = foo.Bar
 		env.Await(
 			OnceMet(
 				env.DoneWithOpen(),
-				NoDiagnostics("_foo/x.go"),
+				EmptyDiagnostics("_foo/x.go"),
 			))
 	})
 }
@@ -1291,7 +1296,7 @@ func main() {}
 	Run(t, dir, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
 		env.OpenFile("other.go")
-		x := env.DiagnosticsFor("main.go")
+		x := env.Awaiter.DiagnosticsFor("main.go")
 		if x == nil {
 			t.Fatalf("expected 1 diagnostic, got none")
 		}
@@ -1299,7 +1304,7 @@ func main() {}
 			t.Fatalf("main.go, got %d diagnostics, expected 1", len(x.Diagnostics))
 		}
 		keep := x.Diagnostics[0]
-		y := env.DiagnosticsFor("other.go")
+		y := env.Awaiter.DiagnosticsFor("other.go")
 		if len(y.Diagnostics) != 1 {
 			t.Fatalf("other.go: got %d diagnostics, expected 1", len(y.Diagnostics))
 		}
@@ -1543,7 +1548,7 @@ func Hello() {
 }
 -- go.mod --
 module mod.com
--- main.go --
+-- cmd/main.go --
 package main
 
 import "mod.com/bob"
@@ -1553,11 +1558,12 @@ func main() {
 }
 `
 	Run(t, mod, func(t *testing.T, env *Env) {
+		env.Await(FileWatchMatching("bob"))
 		env.RemoveWorkspaceFile("bob")
 		env.Await(
-			env.DiagnosticAtRegexp("main.go", `"mod.com/bob"`),
+			env.DiagnosticAtRegexp("cmd/main.go", `"mod.com/bob"`),
 			EmptyDiagnostics("bob/bob.go"),
-			RegistrationMatching("didChangeWatchedFiles"),
+			NoFileWatchMatching("bob"),
 		)
 	})
 }
@@ -1682,57 +1688,6 @@ import (
 		).Run(t, mod, func(t *testing.T, env *Env) {
 			env.Await(
 				env.DiagnosticAtRegexpWithMessage("main.go", `"nosuchpkg"`, `cannot find package "nosuchpkg" in any of`),
-			)
-		})
-	})
-}
-
-func TestMultipleModules_Warning(t *testing.T) {
-	const modules = `
--- a/go.mod --
-module a.com
-
-go 1.12
--- a/a.go --
-package a
--- b/go.mod --
-module b.com
-
-go 1.12
--- b/b.go --
-package b
-`
-	for _, go111module := range []string{"on", "auto"} {
-		t.Run("GO111MODULE="+go111module, func(t *testing.T) {
-			WithOptions(
-				Modes(Default),
-				EnvVars{"GO111MODULE": go111module},
-			).Run(t, modules, func(t *testing.T, env *Env) {
-				env.OpenFile("a/a.go")
-				env.OpenFile("b/go.mod")
-				env.Await(
-					env.DiagnosticAtRegexp("a/a.go", "package a"),
-					env.DiagnosticAtRegexp("b/go.mod", "module b.com"),
-					OutstandingWork(lsp.WorkspaceLoadFailure, "gopls requires a module at the root of your workspace."),
-				)
-			})
-		})
-	}
-
-	// Expect no warning if GO111MODULE=auto in a directory in GOPATH.
-	t.Run("GOPATH_GO111MODULE_auto", func(t *testing.T) {
-		WithOptions(
-			Modes(Default),
-			EnvVars{"GO111MODULE": "auto"},
-			InGOPATH(),
-		).Run(t, modules, func(t *testing.T, env *Env) {
-			env.OpenFile("a/a.go")
-			env.Await(
-				OnceMet(
-					env.DoneWithOpen(),
-					NoDiagnostics("a/a.go"),
-				),
-				NoOutstandingWork(),
 			)
 		})
 	})

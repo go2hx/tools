@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"strings"
 	"sync"
@@ -75,6 +76,8 @@ const (
 
 	// SeparateProcess uses the default options, but forwards connection to an
 	// external gopls daemon.
+	//
+	// Only supported on GOOS=linux.
 	SeparateProcess
 
 	// Experimental enables all of the experimental configurations that are
@@ -119,19 +122,20 @@ type Runner struct {
 	store     *memoize.Store // shared store
 
 	// Lazily allocated resources
-	mu        sync.Mutex
-	ts        *servertest.TCPServer
-	socketDir string
+	tsOnce sync.Once
+	ts     *servertest.TCPServer // shared in-process test server ("forwarded" mode)
+
+	startRemoteOnce sync.Once
+	remoteSocket    string // unix domain socket for shared daemon ("separate process" mode)
+	remoteErr       error
+	cancelRemote    func()
 }
 
 type runConfig struct {
-	editor           fake.EditorConfig
-	sandbox          fake.SandboxConfig
-	modes            Mode
-	noDefaultTimeout bool
-	debugAddr        string
-	skipLogs         bool
-	skipHooks        bool
+	editor    fake.EditorConfig
+	sandbox   fake.SandboxConfig
+	modes     Mode
+	skipHooks bool
 }
 
 // A RunOption augments the behavior of the test runner.
@@ -143,15 +147,6 @@ type optionSetter func(*runConfig)
 
 func (f optionSetter) set(opts *runConfig) {
 	f(opts)
-}
-
-// NoDefaultTimeout removes the timeout set by the -regtest_timeout flag, for
-// individual tests that are expected to run longer than is reasonable for
-// ordinary regression tests.
-func NoDefaultTimeout() RunOption {
-	return optionSetter(func(opts *runConfig) {
-		opts.noDefaultTimeout = true
-	})
 }
 
 // ProxyFiles configures a file proxy using the given txtar-encoded string.
@@ -234,50 +229,6 @@ func InGOPATH() RunOption {
 	})
 }
 
-// DebugAddress configures a debug server bound to addr. This option is
-// currently only supported when executing in Default mode. It is intended to
-// be used for long-running stress tests.
-func DebugAddress(addr string) RunOption {
-	return optionSetter(func(opts *runConfig) {
-		opts.debugAddr = addr
-	})
-}
-
-// SkipLogs skips the buffering of logs during test execution. It is intended
-// for long-running stress tests.
-func SkipLogs() RunOption {
-	return optionSetter(func(opts *runConfig) {
-		opts.skipLogs = true
-	})
-}
-
-// InExistingDir runs the test in a pre-existing directory. If set, no initial
-// files may be passed to the runner. It is intended for long-running stress
-// tests.
-func InExistingDir(dir string) RunOption {
-	return optionSetter(func(opts *runConfig) {
-		opts.sandbox.Workdir = dir
-	})
-}
-
-// SkipHooks allows for disabling the test runner's client hooks that are used
-// for instrumenting expectations (tracking diagnostics, logs, work done,
-// etc.). It is intended for performance-sensitive stress tests or benchmarks.
-func SkipHooks(skip bool) RunOption {
-	return optionSetter(func(opts *runConfig) {
-		opts.skipHooks = skip
-	})
-}
-
-// GOPROXY configures the test environment to have an explicit proxy value.
-// This is intended for stress tests -- to ensure their isolation, regtests
-// should instead use WithProxyFiles.
-func GOPROXY(goproxy string) RunOption {
-	return optionSetter(func(opts *runConfig) {
-		opts.sandbox.GOPROXY = goproxy
-	})
-}
-
 type TestFunc func(t *testing.T, env *Env)
 
 // Run executes the test function in the default configured gopls execution
@@ -292,7 +243,7 @@ func (r *Runner) Run(t *testing.T, files string, test TestFunc, opts ...RunOptio
 	tests := []struct {
 		name      string
 		mode      Mode
-		getServer func(*testing.T, func(*source.Options)) jsonrpc2.StreamServer
+		getServer func(func(*source.Options)) jsonrpc2.StreamServer
 	}{
 		{"default", Default, r.defaultServer},
 		{"forwarded", Forwarded, r.forwardedServer},
@@ -314,20 +265,13 @@ func (r *Runner) Run(t *testing.T, files string, test TestFunc, opts ...RunOptio
 			continue
 		}
 
-		if config.debugAddr != "" && tc.mode != Default {
-			// Debugging is useful for running stress tests, but since the daemon has
-			// likely already been started, it would be too late to debug.
-			t.Fatalf("debugging regtest servers only works in Default mode, "+
-				"got debug addr %q and mode %v", config.debugAddr, tc.mode)
-		}
-
 		t.Run(tc.name, func(t *testing.T) {
 			// TODO(rfindley): once jsonrpc2 shutdown is fixed, we should not leak
 			// goroutines in this test function.
 			// stacktest.NoLeak(t)
 
 			ctx := context.Background()
-			if r.Timeout != 0 && !config.noDefaultTimeout {
+			if r.Timeout != 0 {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithTimeout(ctx, r.Timeout)
 				defer cancel()
@@ -338,12 +282,8 @@ func (r *Runner) Run(t *testing.T, files string, test TestFunc, opts ...RunOptio
 				defer cancel()
 			}
 
+			// TODO(rfindley): do we need an instance at all? Can it be removed?
 			ctx = debug.WithInstance(ctx, "", "off")
-			if config.debugAddr != "" {
-				di := debug.GetInstance(ctx)
-				di.Serve(ctx, config.debugAddr)
-				di.MonitorMemory(ctx)
-			}
 
 			rootDir := filepath.Join(r.tempDir, filepath.FromSlash(t.Name()))
 			if err := os.MkdirAll(rootDir, 0755); err != nil {
@@ -371,16 +311,26 @@ func (r *Runner) Run(t *testing.T, files string, test TestFunc, opts ...RunOptio
 				}
 			}()
 
-			ss := tc.getServer(t, r.OptionsHook)
+			ss := tc.getServer(r.OptionsHook)
 
 			framer := jsonrpc2.NewRawStream
 			ls := &loggingFramer{}
-			if !config.skipLogs {
-				framer = ls.framer(jsonrpc2.NewRawStream)
-			}
+			framer = ls.framer(jsonrpc2.NewRawStream)
 			ts := servertest.NewPipeServer(ss, framer)
-			env, cleanup := NewEnv(ctx, t, sandbox, ts, config.editor, !config.skipHooks)
-			defer cleanup()
+
+			awaiter := NewAwaiter(sandbox.Workdir)
+			editor, err := fake.NewEditor(sandbox, config.editor).Connect(ctx, ts, awaiter.Hooks())
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := &Env{
+				T:       t,
+				Ctx:     ctx,
+				Sandbox: sandbox,
+				Editor:  editor,
+				Server:  ts,
+				Awaiter: awaiter,
+			}
 			defer func() {
 				if t.Failed() && r.PrintGoroutinesOnFailure {
 					pprof.Lookup("goroutine").WriteTo(os.Stderr, 1)
@@ -395,7 +345,7 @@ func (r *Runner) Run(t *testing.T, files string, test TestFunc, opts ...RunOptio
 				// the editor: in general we want to clean up before proceeding to the
 				// next test, and if there is a deadlock preventing closing it will
 				// eventually be handled by the `go test` timeout.
-				if err := env.Editor.Close(xcontext.Detach(ctx)); err != nil {
+				if err := editor.Close(xcontext.Detach(ctx)); err != nil {
 					t.Errorf("closing editor: %v", err)
 				}
 			}()
@@ -482,12 +432,12 @@ func (s *loggingFramer) printBuffers(testname string, w io.Writer) {
 }
 
 // defaultServer handles the Default execution mode.
-func (r *Runner) defaultServer(t *testing.T, optsHook func(*source.Options)) jsonrpc2.StreamServer {
+func (r *Runner) defaultServer(optsHook func(*source.Options)) jsonrpc2.StreamServer {
 	return lsprpc.NewStreamServer(cache.New(r.fset, r.store, optsHook), false)
 }
 
 // experimentalServer handles the Experimental execution mode.
-func (r *Runner) experimentalServer(t *testing.T, optsHook func(*source.Options)) jsonrpc2.StreamServer {
+func (r *Runner) experimentalServer(optsHook func(*source.Options)) jsonrpc2.StreamServer {
 	options := func(o *source.Options) {
 		optsHook(o)
 		o.EnableAllExperiments()
@@ -499,24 +449,61 @@ func (r *Runner) experimentalServer(t *testing.T, optsHook func(*source.Options)
 }
 
 // forwardedServer handles the Forwarded execution mode.
-func (r *Runner) forwardedServer(_ *testing.T, optsHook func(*source.Options)) jsonrpc2.StreamServer {
-	if r.ts == nil {
-		r.mu.Lock()
+func (r *Runner) forwardedServer(optsHook func(*source.Options)) jsonrpc2.StreamServer {
+	r.tsOnce.Do(func() {
 		ctx := context.Background()
 		ctx = debug.WithInstance(ctx, "", "off")
 		ss := lsprpc.NewStreamServer(cache.New(nil, nil, optsHook), false)
 		r.ts = servertest.NewTCPServer(ctx, ss, nil)
-		r.mu.Unlock()
-	}
+	})
 	return newForwarder("tcp", r.ts.Addr)
 }
 
+// runTestAsGoplsEnvvar triggers TestMain to run gopls instead of running
+// tests. It's a trick to allow tests to find a binary to use to start a gopls
+// subprocess.
+const runTestAsGoplsEnvvar = "_GOPLS_TEST_BINARY_RUN_AS_GOPLS"
+
 // separateProcessServer handles the SeparateProcess execution mode.
-func (r *Runner) separateProcessServer(t *testing.T, optsHook func(*source.Options)) jsonrpc2.StreamServer {
-	// TODO(rfindley): can we use the autostart behavior here, instead of
-	// pre-starting the remote?
-	socket := r.getRemoteSocket(t)
-	return newForwarder("unix", socket)
+func (r *Runner) separateProcessServer(optsHook func(*source.Options)) jsonrpc2.StreamServer {
+	if runtime.GOOS != "linux" {
+		panic("separate process execution mode is only supported on linux")
+	}
+
+	r.startRemoteOnce.Do(func() {
+		socketDir, err := ioutil.TempDir(r.tempDir, "gopls-regtest-socket")
+		if err != nil {
+			r.remoteErr = err
+			return
+		}
+		r.remoteSocket = filepath.Join(socketDir, "gopls-test-daemon")
+
+		// The server should be killed by when the test runner exits, but to be
+		// conservative also set a listen timeout.
+		args := []string{"serve", "-listen", "unix;" + r.remoteSocket, "-listen.timeout", "1m"}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cmd := exec.CommandContext(ctx, r.goplsPath, args...)
+		cmd.Env = append(os.Environ(), runTestAsGoplsEnvvar+"=true")
+
+		// Start the external gopls process. This is still somewhat racy, as we
+		// don't know when gopls binds to the socket, but the gopls forwarder
+		// client has built-in retry behavior that should mostly mitigate this
+		// problem (and if it doesn't, we probably want to improve the retry
+		// behavior).
+		if err := cmd.Start(); err != nil {
+			cancel()
+			r.remoteSocket = ""
+			r.remoteErr = err
+		} else {
+			r.cancelRemote = cancel
+			// Spin off a goroutine to wait, so that we free up resources when the
+			// server exits.
+			go cmd.Wait()
+		}
+	})
+
+	return newForwarder("unix", r.remoteSocket)
 }
 
 func newForwarder(network, address string) *lsprpc.Forwarder {
@@ -528,58 +515,16 @@ func newForwarder(network, address string) *lsprpc.Forwarder {
 	return server
 }
 
-// runTestAsGoplsEnvvar triggers TestMain to run gopls instead of running
-// tests. It's a trick to allow tests to find a binary to use to start a gopls
-// subprocess.
-const runTestAsGoplsEnvvar = "_GOPLS_TEST_BINARY_RUN_AS_GOPLS"
-
-func (r *Runner) getRemoteSocket(t *testing.T) string {
-	t.Helper()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	const daemonFile = "gopls-test-daemon"
-	if r.socketDir != "" {
-		return filepath.Join(r.socketDir, daemonFile)
-	}
-
-	if r.goplsPath == "" {
-		t.Fatal("cannot run tests with a separate process unless a path to a gopls binary is configured")
-	}
-	var err error
-	r.socketDir, err = ioutil.TempDir(r.tempDir, "gopls-regtest-socket")
-	if err != nil {
-		t.Fatalf("creating tempdir: %v", err)
-	}
-	socket := filepath.Join(r.socketDir, daemonFile)
-	args := []string{"serve", "-listen", "unix;" + socket, "-listen.timeout", "10s"}
-	cmd := exec.Command(r.goplsPath, args...)
-	cmd.Env = append(os.Environ(), runTestAsGoplsEnvvar+"=true")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	go func() {
-		// TODO(rfindley): this is racy; we're returning before we know that the command is running.
-		if err := cmd.Run(); err != nil {
-			panic(fmt.Sprintf("error running external gopls: %v\nstderr:\n%s", err, stderr.String()))
-		}
-	}()
-	return socket
-}
-
 // Close cleans up resource that have been allocated to this workspace.
 func (r *Runner) Close() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	var errmsgs []string
 	if r.ts != nil {
 		if err := r.ts.Close(); err != nil {
 			errmsgs = append(errmsgs, err.Error())
 		}
 	}
-	if r.socketDir != "" {
-		if err := os.RemoveAll(r.socketDir); err != nil {
-			errmsgs = append(errmsgs, err.Error())
-		}
+	if r.cancelRemote != nil {
+		r.cancelRemote()
 	}
 	if !r.SkipCleanup {
 		if err := os.RemoveAll(r.tempDir); err != nil {

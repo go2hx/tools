@@ -141,7 +141,7 @@ func (s *snapshot) load(ctx context.Context, allowNetwork bool, scopes ...interf
 	}
 
 	moduleErrs := make(map[string][]packages.Error) // module path -> errors
-	filterer := buildFilterer(s.view.rootURI.Filename(), s.view.gomodcache, s.view.options)
+	filterer := buildFilterer(s.view.rootURI.Filename(), s.view.gomodcache, s.view.Options())
 	newMetadata := make(map[PackageID]*KnownMetadata)
 	for _, pkg := range pkgs {
 		// The Go command returns synthetic list results for module queries that
@@ -283,15 +283,20 @@ func (m *moduleErrorMap) Error() string {
 // workspaceLayoutErrors returns a diagnostic for every open file, as well as
 // an error message if there are no open files.
 func (s *snapshot) workspaceLayoutError(ctx context.Context) *source.CriticalError {
+	// TODO(rfindley): do we really not want to show a critical error if the user
+	// has no go.mod files?
 	if len(s.workspace.getKnownModFiles()) == 0 {
 		return nil
 	}
+
+	// TODO(rfindley): both of the checks below should be delegated to the workspace.
 	if s.view.userGo111Module == off {
 		return nil
 	}
 	if s.workspace.moduleSource != legacyWorkspace {
 		return nil
 	}
+
 	// If the user has one module per view, there is nothing to warn about.
 	if s.ValidBuildConfiguration() && len(s.workspace.getKnownModFiles()) == 1 {
 		return nil
@@ -305,10 +310,21 @@ func (s *snapshot) workspaceLayoutError(ctx context.Context) *source.CriticalErr
 	// that the user has opened a directory that contains multiple modules.
 	// Check for that an warn about it.
 	if !s.ValidBuildConfiguration() {
-		msg := `gopls requires a module at the root of your workspace.
-You can work with multiple modules by opening each one as a workspace folder.
-Improvements to this workflow will be coming soon, and you can learn more here:
+		var msg string
+		if s.view.goversion >= 18 {
+			msg = `gopls was not able to find modules in your workspace.
+When outside of GOPATH, gopls needs to know which modules you are working on.
+You can fix this by opening your workspace to a folder inside a Go module, or
+by using a go.work file to specify multiple modules.
+See the documentation for more information on setting up your workspace:
 https://github.com/golang/tools/blob/master/gopls/doc/workspace.md.`
+		} else {
+			msg = `gopls requires a module at the root of your workspace.
+You can work with multiple modules by upgrading to Go 1.18 or later, and using
+go workspaces (go.work files).
+See the documentation for more information on setting up your workspace:
+https://github.com/golang/tools/blob/master/gopls/doc/workspace.md.`
+		}
 		return &source.CriticalError{
 			MainError:   fmt.Errorf(msg),
 			Diagnostics: s.applyCriticalErrorToFiles(ctx, msg, openFiles),
@@ -364,9 +380,12 @@ func (s *snapshot) applyCriticalErrorToFiles(ctx context.Context, msg string, fi
 		switch s.view.FileKind(fh) {
 		case source.Go:
 			if pgf, err := s.ParseGo(ctx, fh, source.ParseHeader); err == nil {
-				pkgDecl := span.NewRange(pgf.Tok, pgf.File.Package, pgf.File.Name.End())
-				if spn, err := pkgDecl.Span(); err == nil {
-					rng, _ = pgf.Mapper.Range(spn)
+				// Check that we have a valid `package foo` range to use for positioning the error.
+				if pgf.File.Package.IsValid() && pgf.File.Name != nil && pgf.File.Name.End().IsValid() {
+					pkgDecl := span.NewRange(pgf.Tok, pgf.File.Package, pgf.File.Name.End())
+					if spn, err := pkgDecl.Span(); err == nil {
+						rng, _ = pgf.Mapper.Range(spn)
+					}
 				}
 			}
 		case source.Mod:
@@ -635,17 +654,13 @@ func containsFileInWorkspaceLocked(s *snapshot, m *Metadata) bool {
 func computeWorkspacePackagesLocked(s *snapshot, meta *metadataGraph) map[PackageID]PackagePath {
 	workspacePackages := make(map[PackageID]PackagePath)
 	for _, m := range meta.metadata {
-		if !containsPackageLocked(s, m.Metadata) {
+		// Don't consider invalid packages to be workspace packages. Doing so can
+		// result in type-checking and diagnosing packages that no longer exist,
+		// which can lead to memory leaks and confusing errors.
+		if !m.Valid {
 			continue
 		}
-		if m.PkgFilesChanged {
-			// If a package name has changed, it's possible that the package no
-			// longer exists. Leaving it as a workspace package can result in
-			// persistent stale diagnostics.
-			//
-			// If there are still valid files in the package, it will be reloaded.
-			//
-			// There may be more precise heuristics.
+		if !containsPackageLocked(s, m.Metadata) {
 			continue
 		}
 
