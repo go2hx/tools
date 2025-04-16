@@ -210,7 +210,11 @@ func (i *Invocation) run(ctx context.Context, stdout, stderr io.Writer) error {
 		appendOverlayFlag()
 		goArgs = append(goArgs, i.Args...)
 	}
-	cmd := exec.Command("go", goArgs...)
+	goCommand := "go"
+	if env := os.Getenv("GOCMD"); env != "" {
+		goCommand = env
+	}
+	cmd := exec.Command(goCommand, goArgs...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	// On darwin the cwd gets resolved to the real path, which breaks anything that
