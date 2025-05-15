@@ -263,6 +263,24 @@ func Load(cfg *Config, sizes *types.StdSizes, patterns ...string) ([]*Package, e
 	return l.refine(response.Roots, response.Packages...)
 }
 
+func Init(cfg *Config, sizes *types.StdSizes, patterns ...string) (*loader, *driverResponse, error) {
+	l := newLoader(cfg)
+	response, err := defaultDriver(&l.Config, patterns...)
+	if err != nil {
+		return nil, nil, err
+	}
+	if sizes != nil {
+		l.sizes = sizes
+	} else {
+		l.sizes = response.Sizes
+	}
+	return l, response, nil
+}
+
+func Refine(l *loader, response *driverResponse) ([]*Package, error) {
+	return l.refine(response.Roots, response.Packages...)
+}
+
 // defaultDriver is a driver that implements go/packages' fallback behavior.
 // It will try to request to an external driver, if one exists. If there's
 // no external driver, or the driver returns a response with NotHandled set,
