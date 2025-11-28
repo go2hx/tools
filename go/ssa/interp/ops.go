@@ -13,10 +13,10 @@ import (
 	"os"
 	"reflect"
 	"strings"
-	"sync"
 	"unsafe"
 
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/internal/typeparams"
 )
 
 // If the target program panics, the interpreter panics with this type.
@@ -34,9 +34,10 @@ type exitPanic int
 // constValue returns the value of the constant with the
 // dynamic type tag appropriate for c.Type().
 func constValue(c *ssa.Const) value {
-	if c.IsNil() {
-		return zero(c.Type()) // typed nil
+	if c.Value == nil {
+		return zero(c.Type()) // typed zero
 	}
+	// c is not a type parameter so it's underlying type is basic.
 
 	if t, ok := c.Type().Underlying().(*types.Basic); ok {
 		// TODO(adonovan): eliminate untyped constants from SSA form.
@@ -91,8 +92,8 @@ func constValue(c *ssa.Const) value {
 func fitsInt(x int64, sizes types.Sizes) bool {
 	intSize := sizes.Sizeof(types.Typ[types.Int])
 	if intSize < sizes.Sizeof(types.Typ[types.Int64]) {
-		maxInt := int64(1)<<(intSize-1) - 1
-		minInt := -int64(1) << (intSize - 1)
+		maxInt := int64(1)<<((intSize*8)-1) - 1
+		minInt := -int64(1) << ((intSize * 8) - 1)
 		return minInt <= x && x <= maxInt
 	}
 	return true
@@ -233,6 +234,8 @@ func zero(t types.Type) value {
 		return a
 	case *types.Named:
 		return zero(t.Underlying())
+	case *types.Alias:
+		return zero(types.Unalias(t))
 	case *types.Interface:
 		return iface{} // nil type, methodset and value
 	case *types.Slice:
@@ -307,7 +310,7 @@ func slice(x, lo, hi, max value) value {
 	panic(fmt.Sprintf("slice: unexpected X type: %T", x))
 }
 
-// lookup returns x[idx] where x is a map or string.
+// lookup returns x[idx] where x is a map.
 func lookup(instr *ssa.Lookup, x, idx value) value {
 	switch x := x.(type) { // map or string
 	case map[value]value, *hashmap:
@@ -327,8 +330,6 @@ func lookup(instr *ssa.Lookup, x, idx value) value {
 			v = tuple{v, ok}
 		}
 		return v
-	case string:
-		return x[asInt64(idx)]
 	}
 	panic(fmt.Sprintf("unexpected x type in Lookup: %T", x))
 }
@@ -882,7 +883,7 @@ func unop(instr *ssa.UnOp, x value) value {
 			return -x
 		}
 	case token.MUL:
-		return load(deref(instr.X.Type()), x.(*value))
+		return load(typeparams.MustDeref(instr.X.Type()), x.(*value))
 	case token.NOT:
 		return !x.(bool)
 	case token.XOR:
@@ -917,7 +918,7 @@ func unop(instr *ssa.UnOp, x value) value {
 // typeAssert checks whether dynamic type of itf is instr.AssertedType.
 // It returns the extracted value on success, and panics on failure,
 // unless instr.CommaOk, in which case it always returns a "value,ok" tuple.
-func typeAssert(i *interpreter, instr *ssa.TypeAssert, itf iface) value {
+func typeAssert(instr *ssa.TypeAssert, itf iface) value {
 	var v value
 	err := ""
 	if itf.t == nil {
@@ -925,7 +926,7 @@ func typeAssert(i *interpreter, instr *ssa.TypeAssert, itf iface) value {
 
 	} else if idst, ok := instr.AssertedType.Underlying().(*types.Interface); ok {
 		v = itf
-		err = checkInterface(i, idst, itf)
+		err = checkInterface(idst, itf)
 
 	} else if types.Identical(itf.t, instr.AssertedType) {
 		v = itf.v // extract value
@@ -933,6 +934,8 @@ func typeAssert(i *interpreter, instr *ssa.TypeAssert, itf iface) value {
 	} else {
 		err = fmt.Sprintf("interface conversion: interface is %s, not %s", itf.t, instr.AssertedType)
 	}
+	// Note: if instr.Underlying==true ever becomes reachable from interp check that
+	// types.Identical(itf.t.Underlying(), instr.AssertedType)
 
 	if err != "" {
 		if !instr.CommaOk {
@@ -946,31 +949,12 @@ func typeAssert(i *interpreter, instr *ssa.TypeAssert, itf iface) value {
 	return v
 }
 
-// If CapturedOutput is non-nil, all writes by the interpreted program
-// to file descriptors 1 and 2 will also be written to CapturedOutput.
-//
-// (The $GOROOT/test system requires that the test be considered a
-// failure if "BUG" appears in the combined stdout/stderr output, even
-// if it exits zero.  This is a global variable shared by all
-// interpreters in the same process.)
+// This variable is no longer used but remains to prevent build breakage.
 var CapturedOutput *bytes.Buffer
-var capturedOutputMu sync.Mutex
-
-// write writes bytes b to the target program's standard output.
-// The print/println built-ins and the write() system call funnel
-// through here so they can be captured by the test driver.
-func print(b []byte) (int, error) {
-	if CapturedOutput != nil {
-		capturedOutputMu.Lock()
-		CapturedOutput.Write(b) // ignore errors
-		capturedOutputMu.Unlock()
-	}
-	return os.Stdout.Write(b)
-}
 
 // callBuiltin interprets a call to builtin fn with arguments args,
 // returning its result.
-func callBuiltin(caller *frame, callpos token.Pos, fn *ssa.Builtin, args []value) value {
+func callBuiltin(caller *frame, fn *ssa.Builtin, args []value) value {
 	switch fn.Name() {
 	case "append":
 		if len(args) == 1 {
@@ -1022,7 +1006,7 @@ func callBuiltin(caller *frame, callpos token.Pos, fn *ssa.Builtin, args []value
 		if ln {
 			buf.WriteRune('\n')
 		}
-		print(buf.Bytes())
+		os.Stderr.Write(buf.Bytes())
 		return nil
 
 	case "len":
@@ -1058,6 +1042,11 @@ func callBuiltin(caller *frame, callpos token.Pos, fn *ssa.Builtin, args []value
 		default:
 			panic(fmt.Sprintf("cap: illegal operand: %T", x))
 		}
+
+	case "min":
+		return foldLeft(min, args)
+	case "max":
+		return foldLeft(max, args)
 
 	case "real":
 		switch c := args[0].(type) {
@@ -1106,12 +1095,15 @@ func callBuiltin(caller *frame, callpos token.Pos, fn *ssa.Builtin, args []value
 				recvType, methodName, recvType))
 		}
 		return recv
+
+	case "ssa:deferstack":
+		return &caller.defers
 	}
 
 	panic("unknown built-in: " + fn.Name())
 }
 
-func rangeIter(x value, t types.Type) iter {
+func rangeIter(x value) iter {
 	switch x := x.(type) {
 	case map[value]value:
 		return &mapIter{iter: reflect.ValueOf(x).MapRange()}
@@ -1205,8 +1197,7 @@ func conv(t_dst, t_src types.Type, x value) value {
 
 	case *types.Slice:
 		// []byte or []rune -> string
-		// TODO(adonovan): fix: type B byte; conv([]B -> string).
-		switch ut_src.Elem().(*types.Basic).Kind() {
+		switch ut_src.Elem().Underlying().(*types.Basic).Kind() {
 		case types.Byte:
 			x := x.([]value)
 			b := make([]byte, 0, len(x))
@@ -1228,7 +1219,6 @@ func conv(t_dst, t_src types.Type, x value) value {
 		x = widen(x)
 
 		// integer -> string?
-		// TODO(adonovan): fix: test integer -> named alias of string.
 		if ut_src.Info()&types.IsInteger != 0 {
 			if ut_dst, ok := ut_dst.(*types.Basic); ok && ut_dst.Kind() == types.String {
 				return fmt.Sprintf("%c", x)
@@ -1240,8 +1230,7 @@ func conv(t_dst, t_src types.Type, x value) value {
 			switch ut_dst := ut_dst.(type) {
 			case *types.Slice:
 				var res []value
-				// TODO(adonovan): fix: test named alias of rune, byte.
-				switch ut_dst.Elem().(*types.Basic).Kind() {
+				switch ut_dst.Elem().Underlying().(*types.Basic).Kind() {
 				case types.Rune:
 					for _, r := range []rune(s) {
 						res = append(res, r)
@@ -1396,18 +1385,15 @@ func conv(t_dst, t_src types.Type, x value) value {
 // sliceToArrayPointer converts the value x of type slice to type t_dst
 // a pointer to array and returns the result.
 func sliceToArrayPointer(t_dst, t_src types.Type, x value) value {
-	utSrc := t_src.Underlying()
-	utDst := t_dst.Underlying()
-
-	if _, ok := utSrc.(*types.Slice); ok {
-		if utSrc, ok := utDst.(*types.Pointer); ok {
-			if arr, ok := utSrc.Elem().(*types.Array); ok {
+	if _, ok := t_src.Underlying().(*types.Slice); ok {
+		if ptr, ok := t_dst.Underlying().(*types.Pointer); ok {
+			if arr, ok := ptr.Elem().Underlying().(*types.Array); ok {
 				x := x.([]value)
 				if arr.Len() > int64(len(x)) {
 					panic("array length is greater than slice length")
 				}
 				if x == nil {
-					return zero(utSrc)
+					return zero(t_dst)
 				}
 				v := value(array(x[:arr.Len()]))
 				return &v
@@ -1421,10 +1407,96 @@ func sliceToArrayPointer(t_dst, t_src types.Type, x value) value {
 // checkInterface checks that the method set of x implements the
 // interface itype.
 // On success it returns "", on failure, an error message.
-func checkInterface(i *interpreter, itype *types.Interface, x iface) string {
+func checkInterface(itype *types.Interface, x iface) string {
 	if meth, _ := types.MissingMethod(x.t, itype, true); meth != nil {
 		return fmt.Sprintf("interface conversion: %v is not %v: missing method %s",
 			x.t, itype, meth.Name())
 	}
 	return "" // ok
+}
+
+func foldLeft(op func(value, value) value, args []value) value {
+	x := args[0]
+	for _, arg := range args[1:] {
+		x = op(x, arg)
+	}
+	return x
+}
+
+func min(x, y value) value {
+	switch x := x.(type) {
+	case float32:
+		return fmin(x, y.(float32))
+	case float64:
+		return fmin(x, y.(float64))
+	}
+
+	// return (y < x) ? y : x
+	if binop(token.LSS, nil, y, x).(bool) {
+		return y
+	}
+	return x
+}
+
+func max(x, y value) value {
+	switch x := x.(type) {
+	case float32:
+		return fmax(x, y.(float32))
+	case float64:
+		return fmax(x, y.(float64))
+	}
+
+	// return (y > x) ? y : x
+	if binop(token.GTR, nil, y, x).(bool) {
+		return y
+	}
+	return x
+}
+
+// copied from $GOROOT/src/runtime/minmax.go
+
+type floaty interface{ ~float32 | ~float64 }
+
+func fmin[F floaty](x, y F) F {
+	if y != y || y < x {
+		return y
+	}
+	if x != x || x < y || x != 0 {
+		return x
+	}
+	// x and y are both ±0
+	// if either is -0, return -0; else return +0
+	return forbits(x, y)
+}
+
+func fmax[F floaty](x, y F) F {
+	if y != y || y > x {
+		return y
+	}
+	if x != x || x > y || x != 0 {
+		return x
+	}
+	// x and y are both ±0
+	// if both are -0, return -0; else return +0
+	return fandbits(x, y)
+}
+
+func forbits[F floaty](x, y F) F {
+	switch unsafe.Sizeof(x) {
+	case 4:
+		*(*uint32)(unsafe.Pointer(&x)) |= *(*uint32)(unsafe.Pointer(&y))
+	case 8:
+		*(*uint64)(unsafe.Pointer(&x)) |= *(*uint64)(unsafe.Pointer(&y))
+	}
+	return x
+}
+
+func fandbits[F floaty](x, y F) F {
+	switch unsafe.Sizeof(x) {
+	case 4:
+		*(*uint32)(unsafe.Pointer(&x)) &= *(*uint32)(unsafe.Pointer(&y))
+	case 8:
+		*(*uint64)(unsafe.Pointer(&x)) &= *(*uint64)(unsafe.Pointer(&y))
+	}
+	return x
 }

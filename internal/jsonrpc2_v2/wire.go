@@ -33,6 +33,10 @@ var (
 	ErrServerOverloaded = NewError(-32000, "JSON RPC overloaded")
 	// ErrUnknown should be used for all non coded errors.
 	ErrUnknown = NewError(-32001, "JSON RPC unknown error")
+	// ErrServerClosing is returned for calls that arrive while the server is closing.
+	ErrServerClosing = NewError(-32002, "JSON RPC server is closing")
+	// ErrClientClosing is a dummy error returned for calls initiated while the client is closing.
+	ErrClientClosing = NewError(-32003, "JSON RPC client is closing")
 )
 
 const wireVersion = "2.0"
@@ -41,15 +45,15 @@ const wireVersion = "2.0"
 // We can decode this and then work out which it is.
 type wireCombined struct {
 	VersionTag string          `json:"jsonrpc"`
-	ID         interface{}     `json:"id,omitempty"`
+	ID         any             `json:"id,omitempty"`
 	Method     string          `json:"method,omitempty"`
 	Params     json.RawMessage `json:"params,omitempty"`
 	Result     json.RawMessage `json:"result,omitempty"`
-	Error      *wireError      `json:"error,omitempty"`
+	Error      *WireError      `json:"error,omitempty"`
 }
 
-// wireError represents a structured error in a Response.
-type wireError struct {
+// WireError represents a structured error in a Response.
+type WireError struct {
 	// Code is an error code indicating the type of failure.
 	Code int64 `json:"code"`
 	// Message is a short description of the error.
@@ -63,12 +67,20 @@ type wireError struct {
 // only be used to build errors for application specific codes as allowed by the
 // specification.
 func NewError(code int64, message string) error {
-	return &wireError{
+	return &WireError{
 		Code:    code,
 		Message: message,
 	}
 }
 
-func (err *wireError) Error() string {
+func (err *WireError) Error() string {
 	return err.Message
+}
+
+func (err *WireError) Is(other error) bool {
+	w, ok := other.(*WireError)
+	if !ok {
+		return false
+	}
+	return err.Code == w.Code
 }

@@ -7,6 +7,7 @@ package satisfy_test
 import (
 	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -14,18 +15,16 @@ import (
 	"sort"
 	"testing"
 
-	"golang.org/x/tools/internal/typeparams"
+	"golang.org/x/tools/internal/testenv"
 	"golang.org/x/tools/refactor/satisfy"
 )
 
 // This test exercises various operations on core types of type parameters.
 // (It also provides pretty decent coverage of the non-generic operations.)
 func TestGenericCoreOperations(t *testing.T) {
-	if !typeparams.Enabled {
-		t.Skip("!typeparams.Enabled")
-	}
-
 	const src = `package foo
+
+import "unsafe"
 
 type I interface { f() }
 
@@ -53,6 +52,9 @@ type R struct{impl}
 type S struct{impl}
 type T struct{impl}
 type U struct{impl}
+type V struct{impl}
+type W struct{impl}
+type X struct{impl}
 
 type Generic[T any] struct{impl}
 func (Generic[T]) g(T) {}
@@ -153,8 +155,18 @@ func  _[T any]() {
 type Gen2[T any] struct{}
 func (f Gen2[T]) g(string) { global = f } // GI[string] <- Gen2[T]
 
-var global GI[string] 
+var global GI[string]
 
+func _() {
+	var x [3]V
+	// golang/go#56227: the finder should visit calls in the unsafe package.
+	_ = unsafe.Slice(&x[0], func() int { var _ I = x[0]; return 3 }()) // I <- V
+}
+
+func _[P ~struct{F I}]() {
+	_ = P{W{}}
+	_ = P{F: X{}}
+}
 `
 	got := constraints(t, src)
 	want := []string{
@@ -184,6 +196,28 @@ var global GI[string]
 		"p.I <- p.S",
 		"p.I <- p.T",
 		"p.I <- p.U",
+		"p.I <- p.V",
+		"p.I <- p.W",
+		"p.I <- p.X",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("found unexpected constraints: got %s, want %s", got, want)
+	}
+}
+
+func TestNewExpr(t *testing.T) {
+	testenv.NeedsGo1Point(t, 26)
+	const src = `package p
+
+type I interface{ f() }
+type C int
+func (C) f() {}
+
+var _ I = new(C(123))
+`
+	got := constraints(t, src)
+	want := []string{
+		"p.I <- *p.C",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("found unexpected constraints: got %s, want %s", got, want)
@@ -201,15 +235,18 @@ func constraints(t *testing.T, src string) []string {
 
 	// type-check
 	info := &types.Info{
-		Types:      make(map[ast.Expr]types.TypeAndValue),
-		Defs:       make(map[*ast.Ident]types.Object),
-		Uses:       make(map[*ast.Ident]types.Object),
-		Implicits:  make(map[ast.Node]types.Object),
-		Scopes:     make(map[ast.Node]*types.Scope),
-		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		Types:        make(map[ast.Expr]types.TypeAndValue),
+		Defs:         make(map[*ast.Ident]types.Object),
+		Uses:         make(map[*ast.Ident]types.Object),
+		Implicits:    make(map[ast.Node]types.Object),
+		Instances:    make(map[*ast.Ident]types.Instance),
+		Scopes:       make(map[ast.Node]*types.Scope),
+		Selections:   make(map[*ast.SelectorExpr]*types.Selection),
+		FileVersions: make(map[*ast.File]string),
 	}
-	typeparams.InitInstanceInfo(info)
-	conf := types.Config{}
+	conf := types.Config{
+		Importer: importer.Default(),
+	}
 	if _, err := conf.Check("p", fset, files, info); err != nil {
 		t.Fatal(err) // type error
 	}

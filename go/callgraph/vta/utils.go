@@ -6,9 +6,10 @@ package vta
 
 import (
 	"go/types"
+	"iter"
 
-	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/internal/typeparams"
 )
 
 func canAlias(n1, n2 node) bool {
@@ -23,7 +24,7 @@ func isReferenceNode(n node) bool {
 		return true
 	}
 
-	if _, ok := n.Type().(*types.Pointer); ok {
+	if _, ok := types.Unalias(n.Type()).(*types.Pointer); ok {
 		return true
 	}
 
@@ -117,39 +118,49 @@ func functionUnderPtr(t types.Type) types.Type {
 }
 
 // sliceArrayElem returns the element type of type `t` that is
-// expected to be a (pointer to) array or slice, consistent with
+// expected to be a (pointer to) array, slice or string, consistent with
 // the ssa.Index and ssa.IndexAddr instructions. Panics otherwise.
 func sliceArrayElem(t types.Type) types.Type {
-	u := t.Underlying()
-
-	if p, ok := u.(*types.Pointer); ok {
-		u = p.Elem().Underlying()
+	switch u := t.Underlying().(type) {
+	case *types.Pointer:
+		switch e := u.Elem().Underlying().(type) {
+		case *types.Array:
+			return e.Elem()
+		case *types.Interface:
+			return sliceArrayElem(e) // e is a type param with matching element types.
+		default:
+			panic(t)
+		}
+	case *types.Array:
+		return u.Elem()
+	case *types.Slice:
+		return u.Elem()
+	case *types.Basic:
+		return types.Typ[types.Byte]
+	case *types.Interface: // type param.
+		terms, err := typeparams.InterfaceTermSet(u)
+		if err != nil || len(terms) == 0 {
+			panic(t)
+		}
+		return sliceArrayElem(terms[0].Type()) // Element types must match.
+	default:
+		panic(t)
 	}
-
-	if a, ok := u.(*types.Array); ok {
-		return a.Elem()
-	}
-	return u.(*types.Slice).Elem()
 }
 
-// siteCallees computes a set of callees for call site `c` given program `callgraph`.
-func siteCallees(c ssa.CallInstruction, callgraph *callgraph.Graph) []*ssa.Function {
-	var matches []*ssa.Function
-
-	node := callgraph.Nodes[c.Parent()]
-	if node == nil {
-		return nil
-	}
-
-	for _, edge := range node.Out {
-		if edge.Site == c {
-			matches = append(matches, edge.Callee.Func)
+// siteCallees returns an iterator for the callees for call site `c`.
+func siteCallees(c ssa.CallInstruction, callees calleesFunc) iter.Seq[*ssa.Function] {
+	return func(yield func(*ssa.Function) bool) {
+		for _, callee := range callees(c) {
+			if !yield(callee) {
+				return
+			}
 		}
 	}
-	return matches
 }
 
 func canHaveMethods(t types.Type) bool {
+	t = types.Unalias(t)
 	if _, ok := t.(*types.Named); ok {
 		return true
 	}
@@ -174,20 +185,4 @@ func calls(f *ssa.Function) []ssa.CallInstruction {
 		}
 	}
 	return calls
-}
-
-// intersect produces an intersection of functions in `fs1` and `fs2`.
-func intersect(fs1, fs2 []*ssa.Function) []*ssa.Function {
-	m := make(map[*ssa.Function]bool)
-	for _, f := range fs1 {
-		m[f] = true
-	}
-
-	var res []*ssa.Function
-	for _, f := range fs2 {
-		if m[f] {
-			res = append(res, f)
-		}
-	}
-	return res
 }

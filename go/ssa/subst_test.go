@@ -10,17 +10,15 @@ import (
 	"go/token"
 	"go/types"
 	"testing"
-
-	"golang.org/x/tools/internal/typeparams"
 )
 
 func TestSubst(t *testing.T) {
-	if !typeparams.Enabled {
-		return
-	}
-
 	const source = `
 package P
+
+func within(){
+	// Pretend that the instantiation happens within this function.
+}
 
 type t0 int
 func (t0) f()
@@ -61,6 +59,11 @@ var _ L[int] = Fn0[L[int]](nil)
 		t.Fatal(err)
 	}
 
+	within, _ := pkg.Scope().Lookup("within").(*types.Func)
+	if within == nil {
+		t.Fatal("Failed to find the function within()")
+	}
+
 	for _, test := range []struct {
 		expr string   // type expression of Named parameterized type
 		args []string // type expressions of args for named
@@ -99,12 +102,8 @@ var _ L[int] = Fn0[L[int]](nil)
 		}
 
 		T := tv.Type.(*types.Named)
-		var tparams []*typeparams.TypeParam
-		for i, l := 0, typeparams.ForNamed(T); i < l.Len(); i++ {
-			tparams = append(tparams, l.At(i))
-		}
 
-		subst := makeSubster(typeparams.NewContext(), tparams, targs, true)
+		subst := makeSubster(types.NewContext(), within, T.TypeParams(), targs)
 		sub := subst.typ(T.Underlying())
 		if got := sub.String(); got != test.want {
 			t.Errorf("subst{%v->%v}.typ(%s) = %v, want %v", test.expr, test.args, T.Underlying(), got, test.want)

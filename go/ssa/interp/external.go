@@ -9,9 +9,11 @@ package interp
 
 import (
 	"bytes"
+	"maps"
 	"math"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,7 +32,7 @@ var externals = make(map[string]externalFn)
 
 func init() {
 	// That little dot ۰ is an Arabic zero numeral (U+06F0), categories [Nd].
-	for k, v := range map[string]externalFn{
+	maps.Copy(externals, map[string]externalFn{
 		"(reflect.Value).Bool":            ext۰reflect۰Value۰Bool,
 		"(reflect.Value).CanAddr":         ext۰reflect۰Value۰CanAddr,
 		"(reflect.Value).CanInterface":    ext۰reflect۰Value۰CanInterface,
@@ -70,6 +72,7 @@ func init() {
 		"bytes.IndexByte":                 ext۰bytes۰IndexByte,
 		"fmt.Sprint":                      ext۰fmt۰Sprint,
 		"math.Abs":                        ext۰math۰Abs,
+		"math.Copysign":                   ext۰math۰Copysign,
 		"math.Exp":                        ext۰math۰Exp,
 		"math.Float32bits":                ext۰math۰Float32bits,
 		"math.Float32frombits":            ext۰math۰Float32frombits,
@@ -110,24 +113,14 @@ func init() {
 		"strings.ToLower":                 ext۰strings۰ToLower,
 		"time.Sleep":                      ext۰time۰Sleep,
 		"unicode/utf8.DecodeRuneInString": ext۰unicode۰utf8۰DecodeRuneInString,
-	} {
-		externals[k] = v
-	}
+	})
 }
 
 func ext۰bytes۰Equal(fr *frame, args []value) value {
 	// func Equal(a, b []byte) bool
 	a := args[0].([]value)
 	b := args[1].([]value)
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return slices.Equal(a, b)
 }
 
 func ext۰bytes۰IndexByte(fr *frame, args []value) value {
@@ -156,6 +149,10 @@ func ext۰math۰Float32frombits(fr *frame, args []value) value {
 
 func ext۰math۰Abs(fr *frame, args []value) value {
 	return math.Abs(args[0].(float64))
+}
+
+func ext۰math۰Copysign(fr *frame, args []value) value {
+	return math.Copysign(args[0].(float64), args[1].(float64))
 }
 
 func ext۰math۰Exp(fr *frame, args []value) value {
@@ -298,24 +295,11 @@ func ext۰time۰Sleep(fr *frame, args []value) value {
 	return nil
 }
 
-func valueToBytes(v value) []byte {
-	in := v.([]value)
-	b := make([]byte, len(in))
-	for i := range in {
-		b[i] = in[i].(byte)
-	}
-	return b
-}
-
 func ext۰os۰Getenv(fr *frame, args []value) value {
 	name := args[0].(string)
 	switch name {
 	case "GOSSAINTERP":
 		return "1"
-	case "GOARCH":
-		return "amd64"
-	case "GOOS":
-		return "linux"
 	}
 	return os.Getenv(name)
 }

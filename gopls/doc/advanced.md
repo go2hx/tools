@@ -1,4 +1,6 @@
-# Advanced topics
+---
+title: "Gopls: Advanced topics"
+---
 
 This documentation is for advanced `gopls` users, who may want to test
 unreleased versions or try out special features.
@@ -9,7 +11,7 @@ To get a specific version of `gopls` (for example, to test a prerelease
 version), run:
 
 ```sh
-GO111MODULE=on go install golang.org/x/tools/gopls@vX.Y.Z
+$ go install golang.org/x/tools/gopls@vX.Y.Z
 ```
 
 Where `vX.Y.Z` is the desired version.
@@ -42,28 +44,16 @@ You can achieve this by adding the right version of `go` to your `PATH`
 (`export PATH=$HOME/go/bin:$PATH` on Unix systems) or by configuring your
 editor.
 
-## Working with generic code
-
-Gopls has support for editing generic Go code. To enable this support, you need
-to **install gopls using Go 1.18 or later**. The easiest way to do this is by
-[installing Go 1.18+](https://go.dev/dl) and then using this Go version to
-install gopls:
+To work on both `std` and `cmd` simultaneously, add a `go.work` file to
+`GOROOT/src`:
 
 ```
-$ go install golang.org/x/tools/gopls@latest
+cd $(go env GOROOT)/src
+go work init . cmd
 ```
 
-It is strongly recommended that you install the latest version of `gopls`, or
-the latest **unstable** version as [described above](#installing-unreleased-versions).
-We're still working on improving our generics support.
-
-The `gopls` built with these instructions understands generic code. See the
-[generics tutorial](https://go.dev/doc/tutorial/generics) for more information
-on how to use generics in Go!
-
-### Known issues
-
-  * [`staticcheck`](https://github.com/golang/tools/blob/master/gopls/doc/settings.md#staticcheck-bool)
-    on generic code is not supported yet.
+Note that you must work inside the `GOROOT/src` subdirectory, as the `go`
+command does not recognize `go.work` files in a parent of `GOROOT/src`
+(https://go.dev/issue/59429).
 
 [Go project]: https://go.googlesource.com/go

@@ -2,32 +2,31 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package usesgenerics defines an Analyzer that checks for usage of generic
-// features added in Go 1.18.
 package usesgenerics
 
 import (
+	_ "embed"
 	"reflect"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
 	"golang.org/x/tools/internal/typeparams/genericfeatures"
 )
 
+//go:embed doc.go
+var doc string
+
 var Analyzer = &analysis.Analyzer{
 	Name:       "usesgenerics",
-	Doc:        Doc,
+	Doc:        analyzerutil.MustExtractDoc(doc, "usesgenerics"),
+	URL:        "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/usesgenerics",
 	Requires:   []*analysis.Analyzer{inspect.Analyzer},
 	Run:        run,
-	ResultType: reflect.TypeOf((*Result)(nil)),
+	ResultType: reflect.TypeFor[*Result](),
 	FactTypes:  []analysis.Fact{new(featuresFact)},
 }
-
-const Doc = `detect whether a package uses generics features
-
-The usesgenerics analysis reports whether a package directly or transitively
-uses certain features associated with generic programming in Go.`
 
 type Features = genericfeatures.Features
 
@@ -54,7 +53,7 @@ type featuresFact struct {
 func (f *featuresFact) AFact()         {}
 func (f *featuresFact) String() string { return f.Features.String() }
 
-func run(pass *analysis.Pass) (interface{}, error) {
+func run(pass *analysis.Pass) (any, error) {
 	inspect := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
 
 	direct := genericfeatures.ForPackage(inspect, pass.TypesInfo)

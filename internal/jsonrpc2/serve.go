@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"os"
 	"time"
@@ -45,7 +46,7 @@ func HandlerServer(h Handler) StreamServer {
 	})
 }
 
-// ListenAndServe starts an jsonrpc2 server on the given address.  If
+// ListenAndServe starts a jsonrpc2 server on the given address.  If
 // idleTimeout is non-zero, ListenAndServe exits after there are no clients for
 // this duration, otherwise it exits only on error.
 func ListenAndServe(ctx context.Context, network, addr string, server StreamServer, idleTimeout time.Duration) error {
@@ -100,7 +101,7 @@ func Serve(ctx context.Context, ln net.Listener, server StreamServer, idleTimeou
 	}()
 
 	// Max duration: ~290 years; surely that's long enough.
-	const forever = 1<<63 - 1
+	const forever = math.MaxInt64
 	if idleTimeout <= 0 {
 		idleTimeout = forever
 	}

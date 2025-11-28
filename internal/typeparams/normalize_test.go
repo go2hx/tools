@@ -9,18 +9,14 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"regexp"
 	"strings"
 	"testing"
 
-	"golang.org/x/tools/internal/typeparams"
 	. "golang.org/x/tools/internal/typeparams"
 )
 
 func TestStructuralTerms(t *testing.T) {
-	if !Enabled {
-		t.Skip("typeparams are not enabled")
-	}
-
 	// In the following tests, src must define a type T with (at least) one type
 	// parameter. We will compute the structural terms of the first type
 	// parameter.
@@ -38,7 +34,7 @@ func TestStructuralTerms(t *testing.T) {
 		{"package emptyintersection; type T[P interface{ ~int; string }] int", "", "empty type set"},
 
 		{"package embedded0; type T[P interface{ I }] int; type I interface { int }", "int", ""},
-		{"package embedded1; type T[P interface{ I | string }] int; type I interface{ int | ~string }", "int|~string", ""},
+		{"package embedded1; type T[P interface{ I | string }] int; type I interface{ int | ~string }", "int ?\\| ?~string", ""},
 		{"package embedded2; type T[P interface{ I; string }] int; type I interface{ int | ~string }", "string", ""},
 
 		{"package named; type T[P C] int; type C interface{ ~int|int }", "~int", ""},
@@ -52,7 +48,7 @@ type B interface{ int|string }
 type C interface { ~string|~int }
 
 type T[P interface{ A|B; C }] int
-`, "~string|int", ""},
+`, "~string ?\\| ?int", ""},
 	}
 
 	for _, test := range tests {
@@ -75,7 +71,7 @@ type T[P interface{ A|B; C }] int
 			if obj == nil {
 				t.Fatal("type T not found")
 			}
-			T := typeparams.ForNamed(obj.Type().(*types.Named)).At(0)
+			T := obj.Type().(*types.Named).TypeParams().At(0)
 			terms, err := StructuralTerms(T)
 			if test.wantError != "" {
 				if err == nil {
@@ -93,10 +89,11 @@ type T[P interface{ A|B; C }] int
 			if len(terms) == 0 {
 				got = "all"
 			} else {
-				qf := types.RelativeTo(pkg)
-				got = types.TypeString(NewUnion(terms), qf)
+				qual := types.RelativeTo(pkg)
+				got = types.TypeString(types.NewUnion(terms), qual)
 			}
-			if got != test.want {
+			want := regexp.MustCompile(test.want)
+			if !want.MatchString(got) {
 				t.Errorf("StructuralTerms(%s) = %q, want %q", T, got, test.want)
 			}
 		})

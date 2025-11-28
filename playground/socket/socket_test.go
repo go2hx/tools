@@ -52,7 +52,7 @@ func TestLimiter(t *testing.T) {
 	ch := make(chan *Message)
 	go func() {
 		var m Message
-		for i := 0; i < msgLimit+10; i++ {
+		for range msgLimit + 10 {
 			ch <- &m
 		}
 		ch <- &Message{Kind: "end"}
@@ -69,9 +69,5 @@ func TestLimiter(t *testing.T) {
 	if n != msgLimit+1 {
 		t.Errorf("received %v messages, want %v", n, msgLimit+1)
 	}
-	select {
-	case <-kr:
-	case <-time.After(100 * time.Millisecond):
-		t.Errorf("process wasn't killed after reaching limit")
-	}
+	<-kr
 }

@@ -5,7 +5,6 @@
 // No testdata on Android.
 
 //go:build !android && go1.11
-// +build !android,go1.11
 
 package main
 
@@ -15,7 +14,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -35,10 +33,6 @@ func init() {
 }
 
 func TestCallgraph(t *testing.T) {
-	if runtime.GOOS == "windows" && runtime.GOARCH == "arm64" {
-		t.Skipf("skipping due to suspected file corruption bug on windows/arm64 (https://go.dev/issue/50706)")
-	}
-
 	testenv.NeedsTool(t, "go")
 
 	gopath, err := filepath.Abs("testdata")
@@ -65,14 +59,6 @@ func TestCallgraph(t *testing.T) {
 			"pkg.main --> pkg.main2",
 			"pkg.main2 --> (pkg.D).f",
 		}},
-		{"pta", false, []string{
-			// pta distinguishes main->C, main2->D.  Also has a root node.
-			`<root> --> pkg.init`,
-			`<root> --> pkg.main`,
-			`pkg.main --> (pkg.C).f`,
-			`pkg.main --> pkg.main2`,
-			`pkg.main2 --> (pkg.D).f`,
-		}},
 		// tests: both the package's main and the test's main are called.
 		// The callgraph includes all the guts of the "testing" package.
 		{"rta", true, []string{
@@ -82,14 +68,6 @@ func TestCallgraph(t *testing.T) {
 			`pkg.main --> (pkg.C).f`,
 		}},
 		{"vta", true, []string{
-			`pkg.test.main --> testing.MainStart`,
-			`testing.runExample --> pkg.Example`,
-			`pkg.Example --> (pkg.C).f`,
-			`pkg.main --> (pkg.C).f`,
-		}},
-		{"pta", true, []string{
-			`<root> --> pkg.test.main`,
-			`<root> --> pkg.main`,
 			`pkg.test.main --> testing.MainStart`,
 			`testing.runExample --> pkg.Example`,
 			`pkg.Example --> (pkg.C).f`,
