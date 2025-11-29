@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/types"
 	"os"
 	"os/exec"
 	"slices"
@@ -76,6 +77,9 @@ type DriverResponse struct {
 	// (e.g. the go command on the PATH) when selecting .go files.
 	// Zero means unknown.
 	GoVersion int
+
+	// Sizes, if not nil, is the types.Sizes to use when type checking.
+	Sizes *types.StdSizes
 }
 
 // driver is the type for functions that query the build system for the
